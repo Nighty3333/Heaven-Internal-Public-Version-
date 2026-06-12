@@ -1,8 +1,8 @@
 # Heaven Internal — Public Version
 
 In-game overlay for **Umamusume Pretty Derby (Global)**. Public release: **SuperSkip**,
-**Frame Rate** control, and **Team Trials capture**. Renders inside the game (D3D11 +
-imgui) — no external window.
+**Frame Rate** control, **Team Trials capture**, and an optional **custom video intro**.
+Renders inside the game (D3D11 + imgui) — no external window.
 
 **Made by Night DC : nighty3333**
 
@@ -78,6 +78,43 @@ Heaven dashboard**, which is what reads and analyzes the captured data.
    **https://github.com/Nighty3333/Heaven**
 
 This public build only does the *capture*; the analysis lives in Heaven (normal).
+
+---
+
+## Custom intro  *(optional)*
+
+Play your own video as the game's startup intro. It draws over the splash screens shortly
+after launch, plays your audio track, and shows a **START GAME** button (bottom-right) to
+skip into the game.
+
+Two files in the game folder drive it, read at runtime (no reinstall to change them):
+
+| File | What it is |
+|------|------------|
+| `intro_full.bin` | the video (a stream of frames + a small header) |
+| `intro_song.ogg` | the audio track |
+
+Both go next to `heaven_overlay.dll`. If either is missing, that part is simply skipped.
+
+**Build them from any video** with the included `pack_intro.py` (needs Python 3.8+ and
+ffmpeg, on PATH or `pip install imageio-ffmpeg`):
+
+```
+python pack_intro.py my_video.mp4
+```
+
+This writes `intro_full.bin` and `intro_song.ogg` — copy both next to `heaven_overlay.dll`
+and launch. Resolution and fps are configurable:
+
+```
+python pack_intro.py my_video.mp4 --res 1920x1080 --fps 30
+```
+
+`--res` (default `2560x1440`) and `--fps` (default `60`) are free. The video is scaled to
+fill the screen, so use a 16:9 size to avoid stretching. Full guide:
+**[custom-intro.md](custom-intro.md)**. Delete the two files to restore the normal startup.
+
+> You supply your own video; nothing copyrighted is included with Heaven.
 
 ---
 
