@@ -69,7 +69,7 @@ back to the game's own startup with nothing drawn over it.
 
 ## A note on content
 
-The packer works with any video you provide. You are responsible for the content you use
-and its licensing. Do not redistribute `intro_full.bin` / `intro_song.ogg` built from
-material you don't have the right to share — these files are not part of the project and
-are never committed to the repository.
+Heaven ships no video or audio of its own — `pack_intro.py` builds `intro_full.bin` and
+`intro_song.ogg` on your machine from whatever video you give it. You're responsible for
+the content you use and its licensing: don't share those two files if they're made from
+material you don't have the right to redistribute.
