@@ -120,6 +120,9 @@ A sidebar with sections: **Skip**, **Performance**, **Capture**, **Intro**, **Up
 **About**. Every setting is remembered across sessions. The open/close key (default
 **Insert**) and the window layout are configurable in **About**.
 
+Prefer something simpler? Toggle **Classic menu** in **About → Layout** to switch to the
+original compact menu in-game — it carries the full feature set, just a plainer style.
+
 ---
 
 ## Updating
