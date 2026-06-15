@@ -10,3 +10,8 @@ intro_song.ogg
 .vscode/
 *.swp
 .DS_Store
+
+# Runtime assets / build outputs — shipped in the release zip, not source
+native/*.dll
+native/heaven-icons/
+native/README.md
