@@ -58,8 +58,8 @@ To uninstall: delete the 3 files.
   high frame rates instead of the default frame-skipping.
 - **Graphics** — force the **max 3D model quality** beyond the in-game cap, plus enhanced
   textures (anisotropic filtering), LOD and shadow detail.
-- **Display & Window** — **always-on-top**, **block-minimize**, **screen mode**
-  (borderless / exclusive / windowed), and **UI scale**.
+- **Display & Window** — **always-on-top**, **block-minimize**, and **screen mode**
+  (borderless / exclusive / windowed).
 
 > **⚠ Frame rate — note:** this **unlocks / caps the frames the game already produces**
 > (removes the 30/60 lock + vSync override) and measures them exactly. It does **not**
@@ -116,12 +116,13 @@ normal startup.
 
 ## The menu (press **Insert**)
 
-A sidebar with sections: **Skip**, **Performance**, **Capture**, **Intro**, **Updates**,
-**About**. Every setting is remembered across sessions. The open/close key (default
-**Insert**) and the window layout are configurable in **About**.
+A sidebar with sections: **Gameplay**, **Camera**, **Visuals**, **Performance**,
+**Interface**, **About**. Every setting is remembered across sessions. The open/close key
+(default **Insert**) and the window layout are configurable in **Interface → Layout**.
 
-Prefer something simpler? Toggle **Classic menu** in **About → Layout** to switch to the
-original compact menu in-game — it carries the full feature set, just a plainer style.
+Prefer something simpler? Toggle **Classic menu** in **Interface → Layout** to switch to the
+original compact menu in-game — it carries the full feature set grouped into collapsible
+categories, just a plainer style.
 
 ---
 
@@ -139,6 +140,22 @@ download → replace files → restart.)
 
 ---
 
+## Build from source
+
+The full source for the overlay DLL lives in [`native/`](native/). Build it with Rust
+(stable, MSVC toolchain) on Windows:
+
+```
+cd native
+cargo build --release
+```
+
+The DLL is produced at `native/target/release/heaven_overlay.dll`. The custom-intro media
+(`intro_full.bin` / `intro_song.ogg`) is not part of the build — supply your own (see the
+Custom intro section above).
+
+---
+
 ## Credits & support
 
 Made by **Night DC : nighty3333**.
@@ -146,5 +163,5 @@ Made by **Night DC : nighty3333**.
 If Heaven saves you time, a coffee is appreciated:
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nighty33)
 
-See [LICENSE](LICENSE) for terms — this is proprietary software: **no redistribution,
-no reverse-engineering, no decompilation.**
+Licensed under the **MIT License** — see [LICENSE](LICENSE). The full source is in this
+repository: you're free to read, build, and modify it.
