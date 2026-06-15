@@ -272,6 +272,10 @@ fn is_press_target(name: &str) -> bool {
         obfstr!("ScreenTap"),
         obfstr!("SingleModeNextButton"),
         obfstr!("TouchSprite"),
+        // Debut / first-race completion (and other special result screens) advance via
+        // a "Continue" button. Safe to press: auto_press only runs when rr_should_advance
+        // (won, or no retries left), so a retry-eligible loss never auto-continues.
+        obfstr!("ContinueButton"),
     ]
     .contains(&name)
 }
