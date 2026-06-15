@@ -1,10 +1,10 @@
-//! Native SuperSkip.
+//! Heaven — native SuperSkip.
 //!
 //! This covers the two "bread and butter" skips:
 //!   1) TRAINING cut-in  → SingleModeTrainingCutInHelper.SkipRuntime()
 //!   2) EVENTS/recreation/Rest → StoryViewController.SkipStory() (guarded by
 //!      trainCutt / TimelineController.IsPlaying + a 1200ms debounce)
-//! plus race-result auto-advance (part 3).
+//! plus race-result auto-advance.
 //!
 //! Every method we INVOKE is called via its compiled methodPointer with the
 //! trailing hidden MethodInfo* arg. Every method we HOOK guards against logical
@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::hooks::{in_heaven, ReentryGuard};
@@ -208,10 +207,11 @@ unsafe extern "C" fn on_start_timeline(this: *mut c_void, m: *mut c_void) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RACE-RESULT AUTO-ADVANCE
-// After "View Results" (+ the unavoidable 1st tap), the result screens
-// auto-press their own buttons to the next turn. Gated behind
-// RACE_RESULT_ENABLED; enabling it never touches the training/event core.
+// B3b — RACE-RESULT AUTO-ADVANCE  (EXPERIMENTAL, default OFF)
+// Port of native_skip.js part 3. After "View Results" (+ the unavoidable 1st
+// tap), the result screens auto-press their own buttons to the next turn.
+// Untested in this native form → gated behind RACE_RESULT_ENABLED; enabling it
+// never touches the proven training/event core.
 // ═══════════════════════════════════════════════════════════════════════════
 // Default ON in builds with feature `races_on`, OFF otherwise.
 static RACE_RESULT_ENABLED: AtomicBool = AtomicBool::new(cfg!(feature = "races_on"));
@@ -247,7 +247,8 @@ fn rr_should_advance() -> bool {
     }
     // Auto-advance when the player WON (placement 1), OR when no race retries remain
     // (`available_continue_num` == 0): a retry isn't possible, so don't hold the result
-    // screen on a loss. continues == -1 means "unknown" → fall back to the win-only gate.
+    // screen on a loss. Placement + continues come from the response hook (race_net).
+    // continues == -1 means "unknown" → fall back to the win-only gate.
     #[cfg(feature = "raceread")]
     {
         let won = crate::race::player_finish_order() == 1;
@@ -262,28 +263,27 @@ fn rr_should_advance() -> bool {
 
 const PRESS_GAP_MS: u64 = 130;
 const MULTI_MAX: u32 = 4;
-// EXACT whitelist + exact match (substring matching caused mis-presses). The
-// names are obfuscated in the binary (obfstr) so `strings` can't lift them.
+// EXACT whitelist + exact match (substring matching caused mis-presses).
 fn is_press_target(name: &str) -> bool {
     [
-        obfstr!("ButtonCommon"),
-        obfstr!("ButtonCenter"),
-        obfstr!("NextButton"),
-        obfstr!("ScreenTap"),
-        obfstr!("SingleModeNextButton"),
-        obfstr!("TouchSprite"),
+        "ButtonCommon",
+        "ButtonCenter",
+        "NextButton",
+        "ScreenTap",
+        "SingleModeNextButton",
+        "TouchSprite",
         // Debut / first-race completion (and other special result screens) advance via
         // a "Continue" button. Safe to press: auto_press only runs when rr_should_advance
         // (won, or no retries left), so a retry-eligible loss never auto-continues.
-        obfstr!("ContinueButton"),
+        "ContinueButton",
     ]
     .contains(&name)
 }
 fn is_multi(name: &str) -> bool {
-    name == obfstr!("ScreenTap")
-        || name == obfstr!("TouchSprite")
-        || name == obfstr!("ButtonCommon")
-        || name == obfstr!("ButtonCenter")
+    name == "ScreenTap"
+        || name == "TouchSprite"
+        || name == "ButtonCommon"
+        || name == "ButtonCenter"
 }
 
 /// Append a line to the native engine log (race-result diagnostics).
@@ -298,7 +298,7 @@ fn rr_log(msg: &str) {
     }
 }
 
-// Single global busy flag: set while WE invoke a
+// Single global busy flag (mirrors native_skip.js `busy`): set while WE invoke a
 // button/dialog method so the Update/Push detours skip during our own calls.
 static BUSY: AtomicBool = AtomicBool::new(false);
 static WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
@@ -418,8 +418,8 @@ fn auto_press(this: *mut c_void) {
     let key = this as usize;
     let now = clock().elapsed().as_millis() as u64;
     let max = if is_multi(&name) { MULTI_MAX } else { 1 };
-    // Read-only check — do NOT consume an attempt yet:
-    // the count/lastPress only advance AFTER a successful click. Otherwise a
+    // Read-only check — do NOT consume an attempt yet (mirrors native_skip.js:
+    // the count/lastPress only advance AFTER a successful click). Otherwise a
     // transiently-locked button (e.g. "Next" during the result reveal) burns its
     // single allowed press on a locked frame and never retries.
     {
@@ -468,7 +468,7 @@ fn auto_close(dlg: *mut c_void) {
     if dlg.is_null() || BUSY.load(Ordering::Relaxed) {
         return;
     }
-    if !il2cpp::object_class_name(dlg).contains(obfstr!("DialogCommon")) {
+    if !il2cpp::object_class_name(dlg).contains("DialogCommon") {
         return;
     }
     {
@@ -522,7 +522,7 @@ unsafe extern "C" fn on_pointer_click(this: *mut c_void, evt: *mut c_void, m: *m
         && !in_heaven()
         && !WINDOW_OPEN.load(Ordering::Relaxed)
         && !IN_TEAM_TRIALS.load(Ordering::Relaxed)
-        && button_name(this).contains(obfstr!("RaceSkipButton"))
+        && button_name(this).contains("RaceSkipButton")
     {
         WINDOW_OPEN.store(true, Ordering::Relaxed);
         clear_rr_caches();
@@ -576,23 +576,23 @@ unsafe extern "C" fn on_push2(
     rv
 }
 
-/// Install race-result auto-advance.
+/// Install race-result auto-advance (faithful port of native_skip.js part 3).
 /// Independent of training/events. Returns Ok(note) describing what resolved.
 pub fn install_race_result() -> Result<String, String> {
     let mut note = String::new();
-    let btn = il2cpp::class(obfstr!("Gallop.ButtonCommon"));
+    let btn = il2cpp::class("Gallop.ButtonCommon");
     if btn.is_null() {
         return Err("anchor miss".into());
     }
-    let cvm = il2cpp::class(obfstr!("Gallop.SingleModeChangeViewManager"));
+    let cvm = il2cpp::class("Gallop.SingleModeChangeViewManager");
     if cvm.is_null() {
         return Err("view-mgr miss".into());
     }
-    let dm = il2cpp::class(obfstr!("Gallop.DialogManager"));
-    let dc = il2cpp::class(obfstr!("Gallop.DialogCommon"));
-    let obj = il2cpp::class(obfstr!("UnityEngine.Object"));
-    let es = il2cpp::class(obfstr!("UnityEngine.EventSystems.EventSystem"));
-    let ped = il2cpp::class(obfstr!("UnityEngine.EventSystems.PointerEventData"));
+    let dm = il2cpp::class("Gallop.DialogManager");
+    let dc = il2cpp::class("Gallop.DialogCommon");
+    let obj = il2cpp::class("UnityEngine.Object");
+    let es = il2cpp::class("UnityEngine.EventSystems.EventSystem");
+    let ped = il2cpp::class("UnityEngine.EventSystems.PointerEventData");
 
     // Resolve (code, MethodInfo) pairs.
     let resolve = |cs: &AtomicUsize, ms: &AtomicUsize, k: il2cpp::Class, n: &str, argc: i32| -> bool {
@@ -607,36 +607,36 @@ pub fn install_race_result() -> Result<String, String> {
         ms.store(m as usize, Ordering::Relaxed);
         true
     };
-    if !resolve(&GETNAME_C, &GETNAME_MI, obj, obfstr!("get_name"), 0) {
+    if !resolve(&GETNAME_C, &GETNAME_MI, obj, "get_name", 0) {
         note.push_str("name miss; ");
     }
-    if !resolve(&OPC_C, &OPC_MI, btn, obfstr!("OnPointerClick"), 1) {
+    if !resolve(&OPC_C, &OPC_MI, btn, "OnPointerClick", 1) {
         return Err("click miss".into());
     }
-    resolve(&ISLOCK_C, &ISLOCK_MI, btn, obfstr!("IsLock"), 0);
+    resolve(&ISLOCK_C, &ISLOCK_MI, btn, "IsLock", 0);
     if !dc.is_null() {
-        resolve(&CLOSE_C, &CLOSE_MI, dc, obfstr!("Close"), 0);
+        resolve(&CLOSE_C, &CLOSE_MI, dc, "Close", 0);
     }
-    resolve(&CUR_C, &CUR_MI, es, obfstr!("get_current"), 0);
+    resolve(&CUR_C, &CUR_MI, es, "get_current", 0);
     if !ped.is_null() {
         C_PED.store(ped as usize, Ordering::Relaxed);
-        resolve(&CTOR_C, &CTOR_MI, ped, obfstr!(".ctor"), 1);
+        resolve(&CTOR_C, &CTOR_MI, ped, ".ctor", 1);
     }
     if CTOR_C.load(Ordering::Relaxed) == 0 {
         note.push_str("evt ctor miss; ");
     }
 
     unsafe {
-        install_one(btn, obfstr!("Update"), 0, on_button_update as *const (), &TR_UPDATE, &D_UPDATE)?;
-        install_one(btn, obfstr!("OnPointerClick"), 1, on_pointer_click as *const (), &TR_ONPC, &D_ONPC)?;
-        install_one(cvm, obfstr!("ChangeMainView"), 0, on_change_main_view as *const (), &TR_CMV, &D_CMV)?;
+        install_one(btn, "Update", 0, on_button_update as *const (), &TR_UPDATE, &D_UPDATE)?;
+        install_one(btn, "OnPointerClick", 1, on_pointer_click as *const (), &TR_ONPC, &D_ONPC)?;
+        install_one(cvm, "ChangeMainView", 0, on_change_main_view as *const (), &TR_CMV, &D_CMV)?;
         if dm.is_null() {
             note.push_str("dialog-mgr miss (no auto-close); ");
         } else {
-            if install_one(dm, obfstr!("PushDialog"), 1, on_push1 as *const (), &TR_PUSH1, &D_PUSH1).is_err() {
+            if install_one(dm, "PushDialog", 1, on_push1 as *const (), &TR_PUSH1, &D_PUSH1).is_err() {
                 note.push_str("push1 miss; ");
             }
-            if install_one(dm, obfstr!("PushDialogSequence"), 2, on_push2 as *const (), &TR_PUSH2, &D_PUSH2).is_err() {
+            if install_one(dm, "PushDialogSequence", 2, on_push2 as *const (), &TR_PUSH2, &D_PUSH2).is_err() {
                 note.push_str("push2 miss; ");
             }
         }
@@ -678,20 +678,20 @@ pub fn install() -> (bool, bool, String) {
     let mut events_ok = false;
 
     // ── TRAINING ──  (all IL2CPP names obfuscated → no `strings` leak)
-    let helper = il2cpp::class(obfstr!("Gallop.SingleModeTrainingCutInHelper"));
+    let helper = il2cpp::class("Gallop.SingleModeTrainingCutInHelper");
     if helper.is_null() {
         notes.push_str("train helper miss; ");
     } else {
-        let _ = SKIP_RUNTIME.set(resolve(helper, obfstr!("SkipRuntime"), 0));
+        let _ = SKIP_RUNTIME.set(resolve(helper, "SkipRuntime", 0));
         if !SKIP_RUNTIME.get().map(|i| i.ok()).unwrap_or(false) {
             notes.push_str("train skip miss; ");
         } else {
             let mut any = false;
             unsafe {
                 for r in [
-                    install_one(helper, obfstr!("OnStartCutIn"), 0, on_start_cutin as *const (), &TR_START, &D_START),
-                    install_one(helper, obfstr!("OnPlayCutIn"), 0, on_play_cutin as *const (), &TR_PLAY, &D_PLAY),
-                    install_one(helper, obfstr!("OnPlayMainCutIn"), 0, on_play_main_cutin as *const (), &TR_MAIN, &D_MAIN),
+                    install_one(helper, "OnStartCutIn", 0, on_start_cutin as *const (), &TR_START, &D_START),
+                    install_one(helper, "OnPlayCutIn", 0, on_play_cutin as *const (), &TR_PLAY, &D_PLAY),
+                    install_one(helper, "OnPlayMainCutIn", 0, on_play_main_cutin as *const (), &TR_MAIN, &D_MAIN),
                 ] {
                     match r {
                         Ok(()) => any = true,
@@ -704,22 +704,22 @@ pub fn install() -> (bool, bool, String) {
     }
 
     // ── EVENTS ──
-    let view = il2cpp::class(obfstr!("Gallop.StoryViewController"));
-    let story = il2cpp::class(obfstr!("Gallop.StoryTimelineController"));
+    let view = il2cpp::class("Gallop.StoryViewController");
+    let story = il2cpp::class("Gallop.StoryTimelineController");
     if view.is_null() {
         notes.push_str("story view miss; ");
     } else {
-        let _ = SKIP_STORY.set(resolve(view, obfstr!("SkipStory"), 0));
-        let _ = GET_TL.set(resolve(view, obfstr!("get_TimelineController"), 0));
-        let _ = TRAIN_CUTT.set(resolve(view, obfstr!("get_IsPlayingOrWillPlayTrainingCutt"), 0));
+        let _ = SKIP_STORY.set(resolve(view, "SkipStory", 0));
+        let _ = GET_TL.set(resolve(view, "get_TimelineController", 0));
+        let _ = TRAIN_CUTT.set(resolve(view, "get_IsPlayingOrWillPlayTrainingCutt", 0));
         if !story.is_null() {
-            let _ = IS_PLAYING.set(resolve(story, obfstr!("get_IsPlaying"), 0));
+            let _ = IS_PLAYING.set(resolve(story, "get_IsPlaying", 0));
         }
         if !SKIP_STORY.get().map(|i| i.ok()).unwrap_or(false) {
             notes.push_str("story skip miss; ");
         } else {
             unsafe {
-                match install_one(view, obfstr!("OnStartPlayingTimeline"), 0,
+                match install_one(view, "OnStartPlayingTimeline", 0,
                                   on_start_timeline as *const (), &TR_TIMELINE, &D_TIMELINE) {
                     Ok(()) => events_ok = true,
                     Err(e) => notes.push_str(&format!("{e}; ")),

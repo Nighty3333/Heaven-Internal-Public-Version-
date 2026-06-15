@@ -1,6 +1,6 @@
-//! Shared game-state data types.
+//! Shared game-state data model used by the overlay.
 //!
-//! Every field is `#[serde(default)]` so partial payloads never break the
+//! Every field is `#[serde(default)]` so partial/older payloads never break the
 //! renderer.
 
 use serde::Deserialize;

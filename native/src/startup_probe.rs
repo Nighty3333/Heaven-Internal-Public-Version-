@@ -11,7 +11,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use obfstr::obfstr;
 
 use crate::il2cpp;
 
@@ -40,22 +39,22 @@ pub fn spawn() {
 
         // Wait for the scene API to resolve.
         let sm = {
-            let mut k = il2cpp::class(obfstr!("UnityEngine.SceneManagement.SceneManager"));
+            let mut k = il2cpp::class("UnityEngine.SceneManagement.SceneManager");
             let mut waited = 0u64;
             while k.is_null() && waited < 120_000 {
                 std::thread::sleep(Duration::from_millis(250));
                 waited += 250;
-                k = il2cpp::class(obfstr!("UnityEngine.SceneManagement.SceneManager"));
+                k = il2cpp::class("UnityEngine.SceneManagement.SceneManager");
             }
             k
         };
-        let sc = il2cpp::class(obfstr!("UnityEngine.SceneManagement.Scene"));
+        let sc = il2cpp::class("UnityEngine.SceneManagement.Scene");
         if sm.is_null() || sc.is_null() {
             log("[scene] SceneManager/Scene class not found — probe off");
             return;
         }
-        let gas = il2cpp::method(sm, obfstr!("GetActiveScene"), 0); // static -> Scene(i32 handle)
-        let gname = il2cpp::method(sc, obfstr!("get_name"), 0); // instance(Scene) -> Il2CppString
+        let gas = il2cpp::method(sm, "GetActiveScene", 0); // static -> Scene(i32 handle)
+        let gname = il2cpp::method(sc, "get_name", 0); // instance(Scene) -> Il2CppString
         let gas_p = il2cpp::method_pointer(gas);
         let gname_p = il2cpp::method_pointer(gname);
         if gas_p.is_null() || gname_p.is_null() {

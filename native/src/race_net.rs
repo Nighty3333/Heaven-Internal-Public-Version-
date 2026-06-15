@@ -1,12 +1,10 @@
 //! race_net — player-horse identity from the network race response (feature `racenet`).
 //!
-//! Hooks `Gallop.HttpHelper::DecompressResponse`, and when a race response goes by,
-//! finds the player's horse (the only one with `viewer_id != 0`) and publishes its
-//! `frame_order` to `race.rs` via `set_net_player`. That lets the race-result
-//! SuperSkip gate know the player's finish placement (so "Races" only auto-advances
-//! when you actually WON).
-//!
-//! Only the msgpack player-id parse — no other game data is read here.
+//! It hooks `Gallop.HttpHelper::DecompressResponse`, and when a race response
+//! goes by, finds the player's horse (the only one with `viewer_id != 0`) and
+//! publishes its `frame_order` to `race.rs` via `set_net_player`. That lets the
+//! race-result SuperSkip gate know the player's finish placement (so "Races" only
+//! auto-advances when you actually WON). Only the msgpack player-id parse lives here.
 
 #![allow(dead_code)]
 
@@ -79,13 +77,13 @@ fn parse_race(bytes: &[u8]) {
         Err(_) => return,
     };
     let mut arrs: Vec<&Value> = Vec::new();
-    find_key(&val, obfstr::obfstr!("race_horse_data"), &mut arrs);
+    find_key(&val, "race_horse_data", &mut arrs);
     for a in arrs {
         if let Some(list) = as_arr(a) {
             for (i, hh) in list.iter().enumerate() {
-                let vid = map_get(hh, obfstr::obfstr!("viewer_id")).and_then(|x| x.as_i64()).unwrap_or(0);
+                let vid = map_get(hh, "viewer_id").and_then(|x| x.as_i64()).unwrap_or(0);
                 if vid != 0 {
-                    let fo = map_get(hh, obfstr::obfstr!("frame_order")).and_then(|x| x.as_i64()).unwrap_or(0) as i32;
+                    let fo = map_get(hh, "frame_order").and_then(|x| x.as_i64()).unwrap_or(0) as i32;
                     rlog(&format!("[race_net] player: arrIdx={i} frame_order={fo} horses={}", list.len()));
                     crate::race::set_net_player(i as i32, fo, list.len() as i32);
                     // Auto-frame the player's Uma at race start (freecam build only).
@@ -116,8 +114,8 @@ unsafe fn on_response(ret: *mut c_void) {
     }
     let data = (ret as *mut u8).add(0x20);
     let slice = std::slice::from_raw_parts(data, len);
-    let has_race = contains(slice, obfstr::obfstr!("race_horse_data").as_bytes());
-    let has_cont = contains(slice, obfstr::obfstr!("available_continue_num").as_bytes());
+    let has_race = contains(slice, "race_horse_data".as_bytes());
+    let has_cont = contains(slice, "available_continue_num".as_bytes());
     if !has_race && !has_cont {
         return;
     }
@@ -139,7 +137,7 @@ fn parse_continues(bytes: &[u8]) {
         Err(_) => return,
     };
     let mut hits: Vec<&Value> = Vec::new();
-    find_key(&val, obfstr::obfstr!("available_continue_num"), &mut hits);
+    find_key(&val, "available_continue_num", &mut hits);
     if let Some(n) = hits.first().and_then(|v| v.as_i64()) {
         crate::race::set_continues_available(n as i32);
     }
@@ -210,8 +208,8 @@ unsafe fn find_game_image() -> *mut h::RawImage {
         }
         let nm = CStr::from_ptr(np).to_string_lossy();
         let t = nm.trim_end_matches(".dll");
-        if t.eq_ignore_ascii_case(obfstr::obfstr!("umamusume"))
-            || t.eq_ignore_ascii_case(obfstr::obfstr!("Assembly-CSharp"))
+        if t.eq_ignore_ascii_case("umamusume")
+            || t.eq_ignore_ascii_case("Assembly-CSharp")
         {
             return img;
         }
@@ -234,8 +232,8 @@ pub fn install() {
             rlog("[race_net] game image not found");
             return;
         }
-        let ns = std::ffi::CString::new(obfstr::obfstr!("Gallop")).unwrap();
-        let cn = std::ffi::CString::new(obfstr::obfstr!("HttpHelper")).unwrap();
+        let ns = std::ffi::CString::new("Gallop").unwrap();
+        let cn = std::ffi::CString::new("HttpHelper").unwrap();
         let klass = match h::CLASS_FROM_NAME {
             Some(f) => f(image, ns.as_ptr(), cn.as_ptr()),
             None => std::ptr::null_mut(),
@@ -244,7 +242,7 @@ pub fn install() {
             rlog("[race_net] response class not found");
             return;
         }
-        let mname = std::ffi::CString::new(obfstr::obfstr!("DecompressResponse")).unwrap();
+        let mname = std::ffi::CString::new("DecompressResponse").unwrap();
         let method = match h::CLASS_GET_METHOD_FROM_NAME {
             Some(f) => f(klass, mname.as_ptr(), 1),
             None => std::ptr::null_mut(),

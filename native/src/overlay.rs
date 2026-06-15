@@ -1,10 +1,11 @@
-//! Heaven in-game overlay — imgui render loop drawn inside the game's D3D11
+//! Heaven internal overlay — imgui render loop drawn inside the game's D3D11
 //! swapchain via hudhook.
 //!
 //! Visual design: "Command Rail" (Heaven HUD design direction, amber accent).
 //! The panels dock to one screen edge as a rail and can flip left/right; each
 //! is a draggable/resizable imgui window styled as dark translucent telemetry
-//! glass. Toggles flip the native modules directly.
+//! glass. Data contract is shared with the external HUD (data.rs); toggles flip
+//! the native modules directly (no IPC round-trip).
 
 use hudhook::imgui::{
     self, Condition, Context, FontConfig, FontSource, StyleColor, StyleVar, Ui,
@@ -252,8 +253,8 @@ pub struct HeavenOverlay {
     intro_auto_started: bool,
 }
 
-// Umamusume header banner — baked RGBA (sky + ground + circular character + nameplate).
-// Header banner art, embedded by the `banner` build.
+// Header banner — baked RGBA (sky + ground + circular character + nameplate).
+// Embedded only when the `banner` feature is enabled.
 #[cfg(feature = "banner")]
 const BANNER_RGBA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/banner.rgba"));
 #[cfg(feature = "banner")]
@@ -666,6 +667,10 @@ impl ImguiRenderLoop for HeavenOverlay {
         let key_down = ui.is_key_down(MENU_KEYS[menu_key_idx()].1);
         if key_down && !self.toggle_was_down {
             self.show = !self.show;
+            // Opening the menu once dismisses the first-launch hint forever.
+            if self.show && !crate::settings::seen_hint() {
+                crate::settings::set_seen_hint(true);
+            }
         }
         self.toggle_was_down = key_down;
 
@@ -692,6 +697,11 @@ impl ImguiRenderLoop for HeavenOverlay {
             draw_freecam_telemetry(ui, tx, 150.0, Condition::FirstUseEver);
         }
 
+        // First-launch hint: until the user opens the menu once, show which key opens it
+        // (otherwise a closed menu with an unknown key leaves them stuck).
+        if !self.show && !crate::settings::seen_hint() {
+            draw_first_launch_hint(ui);
+        }
         if !self.show {
             return;
         }
@@ -1178,6 +1188,10 @@ impl HeavenOverlay {
                         DIM,
                         concat!("v", env!("CARGO_PKG_VERSION")),
                     );
+                    // Right edge of the wordmark+version — chips that would cross it are dropped
+                    // (narrow window / large UI scale) so they never overlap the title.
+                    let ver_w = ui.calc_text_size(concat!("v", env!("CARGO_PKG_VERSION")))[0];
+                    let word_right = hx + hw + 8.0 + ver_w + 10.0;
                     // Right-aligned metric chips: dark crystal pills with a subtle border, an
                     // Inter label + Orbitron value, and a faint glow when the value is "active".
                     let skip_on = crate::skip::is_event_enabled()
@@ -1207,6 +1221,10 @@ impl HeavenOverlay {
                         let cwid = cpad * 2.0 + lw + lbl_gap + vw;
                         let cx0 = rx - cwid;
                         let cx1 = rx;
+                        // Would cross into the wordmark → drop this and the remaining (further-left) chips.
+                        if cx0 < word_right {
+                            break;
+                        }
                         if *act {
                             dl.add_rect(
                                 [cx0 - 2.0, chip_y - 2.0],
@@ -1348,17 +1366,20 @@ impl HeavenOverlay {
                                         }
                                         Ctrl::Custom(Custom::Fps) => {
                                             let cur = crate::fps::current();
+                                            let capped = cur > 0;
+                                            let unlimited = cur < 0;
                                             ui.dummy([0.0, 6.0]);
-                                            if toggle_row(ui, "##cap", "Cap FPS", *fps_on, cw) {
-                                                *fps_on = !*fps_on;
-                                                crate::fps::set_cap(if *fps_on { *fps_val } else { 0 });
+                                            // Cap and Unlimited are mutually exclusive and reflect the real
+                                            // mode; toggling the active one returns to Off (no more "both on").
+                                            if toggle_row(ui, "##cap", "Cap FPS", capped, cw) {
+                                                *fps_on = !capped;
+                                                crate::fps::set_cap(if capped { 0 } else { *fps_val });
                                                 crate::settings::save_current();
                                             }
                                             ui.dummy([0.0, 6.0]);
-                                            let unlimited = cur < 0;
                                             if toggle_row(ui, "##unl", "Unlimited", unlimited, cw) {
-                                                *fps_on = true;
-                                                crate::fps::set_cap(if !unlimited { -1 } else { *fps_val });
+                                                *fps_on = false;
+                                                crate::fps::set_cap(if unlimited { 0 } else { -1 });
                                                 crate::settings::save_current();
                                             }
                                             ui.dummy([0.0, 8.0]);
@@ -1649,8 +1670,10 @@ impl HeavenOverlay {
                                     }
                                     Ctrl::Custom(Custom::Fps) => {
                                         let cur = crate::fps::current();
-                                        if ui.checkbox("Cap FPS##capc", fps_on) {
-                                            crate::fps::set_cap(if *fps_on { *fps_val } else { 0 });
+                                        let mut capped = cur > 0;
+                                        if ui.checkbox("Cap FPS##capc", &mut capped) {
+                                            *fps_on = capped;
+                                            crate::fps::set_cap(if capped { *fps_val } else { 0 });
                                             crate::settings::save_current();
                                         }
                                         ui.same_line();
@@ -1666,8 +1689,8 @@ impl HeavenOverlay {
                                         ui.text_colored(DIM, format!("\u{00b7} {fps_now} fps now"));
                                         let mut unlimited = cur < 0;
                                         if ui.checkbox("Unlimited##unlc", &mut unlimited) {
-                                            *fps_on = true;
-                                            crate::fps::set_cap(if unlimited { -1 } else { *fps_val });
+                                            *fps_on = false;
+                                            crate::fps::set_cap(if unlimited { -1 } else { 0 });
                                             crate::settings::save_current();
                                         }
                                         ui.same_line();
@@ -1822,6 +1845,30 @@ fn cat_icon(name: &str) -> &'static str {
         "About" => "\u{E946}",       // Info
         _ => "\u{E700}",             // GlobalNav
     }
+}
+
+/// First-launch hint pill (top-center): "Press <key> to open Heaven". Shown only until the
+/// user opens the menu once, so a closed menu with an unknown toggle key isn't a dead end.
+fn draw_first_launch_hint(ui: &Ui) {
+    let key = MENU_KEYS[menu_key_idx()].0;
+    let label = format!("Press  {key}  to open Heaven");
+    let [dw, _dh] = ui.io().display_size;
+    let tw = ui.calc_text_size(&label)[0];
+    let (padx, pady) = (16.0_f32, 8.0_f32);
+    let w = tw + padx * 2.0;
+    let h = ui.calc_text_size(&label)[1] + pady * 2.0;
+    let x = ((dw - w) * 0.5).max(0.0);
+    let y = 16.0;
+    let dl = ui.get_background_draw_list();
+    dl.add_rect([x, y], [x + w, y + h], [0.082, 0.047, 0.157, 0.92])
+        .filled(true)
+        .rounding(8.0)
+        .build();
+    dl.add_rect([x, y], [x + w, y + h], [0.843, 0.694, 0.365, 0.5])
+        .rounding(8.0)
+        .thickness(1.0)
+        .build();
+    dl.add_text([x + padx, y + pady], TEXT, &label);
 }
 
 thread_local! {
@@ -2081,7 +2128,7 @@ fn pink_slider_i32(ui: &Ui, id: &str, min: i32, max: i32, val: &mut i32, w: f32)
 
 // ── Heaven-styled panel helpers (match the menu: glass, gradient bars, Orbitron) ──
 
-/// Push the glass-window style used by the telemetry panel. Tokens must outlive the window.
+/// Push the glass-window style used by the telemetry HUD. Tokens must outlive the window.
 #[cfg(feature = "freecam")]
 fn panel_style(ui: &Ui) -> impl Sized + '_ {
     (
@@ -2124,7 +2171,6 @@ fn pbar(ui: &Ui, frac: f32, w: f32, h: f32, col: [f32; 4], overlay: &str) {
     }
     ui.dummy([w, h]);
 }
-
 
 /// Per-circuit camera preset manager — a custom animated dropdown (hover-lit rows, eased open,
 /// gold caret) listing this circuit's presets, with rename of the selected one + Default / Delete
@@ -2441,4 +2487,3 @@ fn draw_freecam_telemetry(ui: &Ui, x: f32, y: f32, cond: Condition) {
             persist_window(ui, "telemetry");
         });
 }
-

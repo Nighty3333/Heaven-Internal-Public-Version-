@@ -1,4 +1,4 @@
-//! Native race reader.
+//! Heaven — native race reader.
 //!
 //! Hooks the client-side replay path of RaceSimulateReader to read live horse
 //! frames + the player index, and publishes a RaceState into the shared store.
@@ -9,9 +9,9 @@
 //!
 //! Finish placement (for the race-result Top-1 skip gate): resolved at
 //! `_ImportPostProcess` (fires even on SKIP). The player's sim horse index comes
-//! from the msgpack race response (frame_order - 1, published via
-//! `set_net_player`); their FinishOrder is read out of the sim's own result
-//! array.
+//! from the msgpack race response (frame_order - 1, published by the network
+//! response hook via `set_net_player`); their FinishOrder is read out of the
+//! sim's own result array.
 
 #![allow(dead_code)]
 
@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::data::RaceHorse;
@@ -64,7 +63,7 @@ fn read_horse_frame(retval: *mut c_void, idx: i64) -> RaceHorse {
             lane: (rf32(retval, 0x14) * 100.0).round() / 100.0,
             speed: (rf32(retval, 0x18) * 100.0).round() / 100.0,
             hp: (rf32(retval, 0x1c) * 100.0).round() / 100.0,
-            max_hp: 0.0, // not exposed by the frame struct
+            max_hp: 0.0, // not exposed by the frame struct (matches raceread.js)
             tempt: ri8(retval, 0x20),
             block: ri8(retval, 0x21),
         }
@@ -100,16 +99,16 @@ static CONTINUES: AtomicI32 = AtomicI32::new(-1);
 pub fn continues_available() -> i32 {
     CONTINUES.load(Ordering::Relaxed)
 }
-/// Published by the response hook when a career payload reports available_continue_num.
+/// Published by the response hooks when a career payload reports available_continue_num.
 pub fn set_continues_available(n: i32) {
     CONTINUES.store(n, Ordering::Relaxed);
 }
 
-// Player's horse identity from the msgpack race response (published by the
+// Player's horse identity from the msgpack race response (published by the network
 // DecompressResponse hook). The player is the only horse with viewer_id != 0;
 // its `frame_order - 1` is the sim horse index used to index the result array.
 static NET_PLAYER_FRAMEORDER: AtomicI32 = AtomicI32::new(-1);
-/// Called by the response hook when a race_horse_data payload is seen.
+/// Called by the network response hook when a race_horse_data payload is seen.
 pub fn set_net_player(_arr_idx: i32, frame_order: i32, _horses: i32) {
     NET_PLAYER_FRAMEORDER.store(frame_order, Ordering::Relaxed);
 }
@@ -436,41 +435,41 @@ pub fn install() -> String {
     unsafe {
         h::init();
     }
-    let reader = il2cpp::class(obfstr!("Gallop.RaceSimulateReader"));
-    let mgr = il2cpp::class(obfstr!("Gallop.RaceManager"));
+    let reader = il2cpp::class("Gallop.RaceSimulateReader");
+    let mgr = il2cpp::class("Gallop.RaceManager");
     if reader.is_null() {
         return "reader miss".into();
     }
     let mut got = Vec::new();
     unsafe {
-        if hook(reader, obfstr!("GetFrameDataFromCache"), 1, on_frame as *const (), &TR_FRAME, &D_FRAME) {
+        if hook(reader, "GetFrameDataFromCache", 1, on_frame as *const (), &TR_FRAME, &D_FRAME) {
             got.push("frame");
         }
-        if hook(reader, obfstr!("ImportDirect"), 0, on_import as *const (), &TR_IMPORT, &D_IMPORT) {
+        if hook(reader, "ImportDirect", 0, on_import as *const (), &TR_IMPORT, &D_IMPORT) {
             got.push("import");
         }
-        if hook(reader, obfstr!("_ImportPostProcess"), 0, on_post as *const (), &TR_POST, &D_POST) {
+        if hook(reader, "_ImportPostProcess", 0, on_post as *const (), &TR_POST, &D_POST) {
             got.push("post");
         }
         if !mgr.is_null()
-            && hook(mgr, obfstr!("GetPlayerHorseIndex"), 0, on_player as *const (), &TR_PLAYER, &D_PLAYER)
+            && hook(mgr, "GetPlayerHorseIndex", 0, on_player as *const (), &TR_PLAYER, &D_PLAYER)
         {
             got.push("player");
         }
         // Race-header method pointers: RaceManager.get_RaceInfo → RaceInfo getters.
         if !mgr.is_null() {
-            let m = il2cpp::method(mgr, obfstr!("get_RaceInfo"), 0);
+            let m = il2cpp::method(mgr, "get_RaceInfo", 0);
             if !m.is_null() {
                 M_RACEINFO.store(il2cpp::method_pointer(m) as usize, Ordering::Relaxed);
                 MI_RACEINFO.store(m as usize, Ordering::Relaxed);
             }
         }
-        let ri = il2cpp::class(obfstr!("Gallop.RaceInfo"));
+        let ri = il2cpp::class("Gallop.RaceInfo");
         for (name, fnp, mip) in [
-            (obfstr!("get_RaceTrackId"), &M_TRACKID, &MI_TRACKID),
-            (obfstr!("get_CourseDistance"), &M_CDIST, &MI_CDIST),
-            (obfstr!("get_CourseDistanceType"), &M_CDTYPE, &MI_CDTYPE),
-            (obfstr!("get_Grade"), &M_GRADE, &MI_GRADE),
+            ("get_RaceTrackId", &M_TRACKID, &MI_TRACKID),
+            ("get_CourseDistance", &M_CDIST, &MI_CDIST),
+            ("get_CourseDistanceType", &M_CDTYPE, &MI_CDTYPE),
+            ("get_Grade", &M_GRADE, &MI_GRADE),
         ] {
             let m = il2cpp::method(ri, name, 0);
             if !m.is_null() {

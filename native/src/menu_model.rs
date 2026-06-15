@@ -101,8 +101,7 @@ pub fn model() -> Vec<Tab> {
     let mut tabs: Vec<Tab> = Vec::new();
 
     // ── 1) GAMEPLAY ──────────────────────────────────────────────────────────
-    #[allow(unused_mut)]
-    let mut gameplay = vec![
+    let gameplay = vec![
         Section {
             title: "Superskip",
             icon: '\u{E768}',
@@ -213,8 +212,7 @@ pub fn model() -> Vec<Tab> {
     tabs.push(Tab { name: "Interface", icon: '\u{E8A9}', sections: interface });
 
     // ── 6) ABOUT ─────────────────────────────────────────────────────────────
-    #[allow(unused_mut)]
-    let mut about = vec![
+    let about = vec![
         Section {
             title: "Team Trials",
             icon: '\u{E74E}',

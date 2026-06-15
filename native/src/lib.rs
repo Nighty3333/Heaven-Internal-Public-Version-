@@ -1,12 +1,8 @@
 //! Heaven MOD — in-game overlay DLL entry point.
 //!
-//! Loaded into the game process. On attach we install the D3D11 + imgui overlay
-//! via hudhook. From then on the game's own render thread calls our
-//! `HeavenOverlay::render`, drawing the HUD inside the swapchain — true
-//! in-game rendering, no external window.
-//!
-//! If the game ever ships on D3D12 / Vulkan, swap `ImguiDx11Hooks` below for
-//! `ImguiDx12Hooks` / the Vulkan hook (see build.md).
+//! On attach we install the D3D11 + imgui overlay via hudhook. From then on the
+//! game's own render thread calls our `HeavenOverlay::render`, drawing the HUD
+//! inside the swapchain — true in-game rendering, no external window.
 
 // Intro player support (native song playback, original-BGM mute, title-scene probe).
 // Gated with the `banner` feature, like the video player itself.
@@ -33,8 +29,8 @@ mod ipc;
 mod menu_model;
 mod overlay;
 mod paths;
-// Live race reader: live frames + finish placement (the race-result skip needs
-// placement to know you won).
+// Live race reader (Race panel + race-result win-gate). The race-result skip
+// needs finish placement.
 #[cfg(feature = "raceread")]
 mod race;
 // Player-horse identity from the network response (msgpack).
@@ -57,7 +53,7 @@ impl HeavenOverlay {
     /// Construct the render loop and start the native engine. The engine thread
     /// waits for GameAssembly, resolves IL2CPP, installs every native module
     /// (SuperSkip, FPS, race), and publishes into the shared state the overlay
-    /// renders. Fully in-process, no external host.
+    /// renders.
     pub fn new_with_engine() -> Self {
         boot::spawn();
         // Start the video player's D3D11 device capture early (independent of the IL2CPP

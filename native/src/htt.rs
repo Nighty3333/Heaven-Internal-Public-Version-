@@ -3,7 +3,8 @@
 //! Hooks the game's `TeamStadiumResult..ctor(...)` and, on each Team Trials
 //! result, reads only the fields we need (by name) out of the managed response
 //! object and writes them in **our own compact per-trial format** to
-//! `data/htt/native/<trial_id>.json` for the Heaven dashboard to import.
+//! `data/htt/native/<trial_id>.json`. Heaven's `htt_import.py` parses the raw
+//! `race_scenario` blobs (gzip+base64) and builds `team_trials_history.jsonl`.
 //!
 //! No generic reflection serializer — just targeted reads via Heaven's
 //! GetProcAddress-resolved IL2CPP bindings, written straight into our schema.
@@ -18,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use obfstr::obfstr;
 use retour::RawDetour;
 use serde_json::{json, Map, Value};
 
@@ -266,9 +266,9 @@ fn save(val: Value) {
 
 unsafe fn find_game_image() -> *mut RawImage {
     for n in [
-        obfstr!("umamusume"),
-        obfstr!("Assembly-CSharp"),
-        obfstr!("Gallop"),
+        "umamusume",
+        "Assembly-CSharp",
+        "Gallop",
     ] {
         let img = find_image_by_name(n);
         if !img.is_null() {
@@ -340,7 +340,7 @@ pub fn install() -> String {
         if image.is_null() {
             return "game image not found".into();
         }
-        let klass = find_class(image, obfstr!("TeamStadiumResult"));
+        let klass = find_class(image, "TeamStadiumResult");
         if klass.is_null() {
             return "result class not found".into();
         }

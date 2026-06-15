@@ -1,9 +1,13 @@
-//! Detour layer.
+//! Heaven — detour layer.
 //!
-//! retour trampolining detours installed on the game's compiled methodPointers.
-//! We guard against LOGICAL recursion (our hook calling a method it itself hooks)
-//! with a thread-local flag, so a guarded self-call into a hooked address
-//! re-enters our hook and is short-circuited — no crash, no recursion.
+//! Installs retour trampolining detours on the game's compiled methodPointers.
+//! Native detours let us call the trampoline safely, but we still guard against
+//! LOGICAL recursion (our hook calling a method it itself hooks) with a
+//! thread-local flag.
+//!
+//! Smoke test: hook ONE hot method (ButtonCommon.Update), call the trampoline, and
+//! prove (a) the game keeps running and (b) a guarded self-call into the hooked
+//! address re-enters our hook and is short-circuited — no crash, no recursion.
 
 #![allow(dead_code)]
 
@@ -12,7 +16,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::il2cpp;
@@ -99,11 +102,11 @@ pub fn b1_stats() -> (u64, u64) {
 /// Install the B1 hook on ButtonCommon.Update. Call after il2cpp::init +
 /// thread attach. Returns Err with a reason on failure.
 pub fn install_b1() -> Result<(), String> {
-    let k = il2cpp::class(obfstr!("Gallop.ButtonCommon"));
+    let k = il2cpp::class("Gallop.ButtonCommon");
     if k.is_null() {
         return Err("anchor class miss".into());
     }
-    let m = il2cpp::method(k, obfstr!("Update"), 0);
+    let m = il2cpp::method(k, "Update", 0);
     if m.is_null() {
         return Err("anchor method miss".into());
     }

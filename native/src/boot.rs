@@ -7,7 +7,7 @@
 //!   3) installs every native module (SuperSkip, FPS, race),
 //!   4) marks the engine ready.
 //! From then on the game's own threads drive our hooks and the overlay renders
-//! the shared state — fully in-process.
+//! the shared state.
 //!
 //! A concise startup report is written to logs/heaven-native.log.
 
@@ -84,7 +84,7 @@ pub fn spawn() {
         let heaven_thread = il2cpp::attach_current_thread();
         log("step4: thread attached");
         let mut cwait: u64 = 0;
-        while il2cpp::class(obfstr::obfstr!("Gallop.ButtonCommon")).is_null() {
+        while il2cpp::class("Gallop.ButtonCommon").is_null() {
             std::thread::sleep(Duration::from_millis(250));
             cwait += 250;
             if cwait > 60_000 {

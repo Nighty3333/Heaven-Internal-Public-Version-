@@ -10,7 +10,6 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-use obfstr::obfstr;
 
 use crate::il2cpp;
 
@@ -33,18 +32,18 @@ fn log(msg: &str) {
 
 /// Resolve the AudioManager methods once (call after the runtime is ready).
 pub fn init() {
-    let k = il2cpp::class(obfstr!("Gallop.AudioManager"));
+    let k = il2cpp::class("Gallop.AudioManager");
     if k.is_null() {
         log("[bgm] AudioManager class not found");
         return;
     }
-    let gi = il2cpp::method(k, obfstr!("get_Instance"), 0);
-    let sv = il2cpp::method(k, obfstr!("SetBgmVolume"), 2);
-    let gv = il2cpp::method(k, obfstr!("GetBgmVolume"), 0);
-    let sb = il2cpp::method(k, obfstr!("SetBusVolume"), 2);
-    let gc = il2cpp::method(k, obfstr!("GetCurBusVolumeParam"), 1);
-    let sva = il2cpp::method(k, obfstr!("StopVoiceAll"), 1);
-    let svu = il2cpp::method(k, obfstr!("SetVoiceUnavailable"), 1);
+    let gi = il2cpp::method(k, "get_Instance", 0);
+    let sv = il2cpp::method(k, "SetBgmVolume", 2);
+    let gv = il2cpp::method(k, "GetBgmVolume", 0);
+    let sb = il2cpp::method(k, "SetBusVolume", 2);
+    let gc = il2cpp::method(k, "GetCurBusVolumeParam", 1);
+    let sva = il2cpp::method(k, "StopVoiceAll", 1);
+    let svu = il2cpp::method(k, "SetVoiceUnavailable", 1);
     STOP_VOICE_ALL.store(sva as usize, Ordering::Relaxed);
     SET_VOICE_UNAVAIL.store(svu as usize, Ordering::Relaxed);
     GET_INST.store(gi as usize, Ordering::Relaxed);

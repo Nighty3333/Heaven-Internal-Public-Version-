@@ -1,4 +1,4 @@
-//! Native FPS control.
+//! Heaven — native FPS control.
 //!
 //! Two problems make a one-shot set fail: the game re-sets BOTH
 //! Application.targetFrameRate AND QualitySettings.vSyncCount every frame. vSync
@@ -16,7 +16,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::il2cpp;
@@ -111,18 +110,18 @@ unsafe fn hook(
 
 /// Resolve setters + install both clamp-guards. Call after il2cpp::init.
 pub fn install() -> Result<(), String> {
-    let app = il2cpp::class(obfstr!("UnityEngine.Application"));
+    let app = il2cpp::class("UnityEngine.Application");
     if app.is_null() {
         return Err("app miss".into());
     }
     unsafe {
-        hook(app, obfstr!("set_targetFrameRate"), target_hook as *const (), &TARGET_TRAMP, &TARGET_MI, &TARGET_DETOUR)?;
+        hook(app, "set_targetFrameRate", target_hook as *const (), &TARGET_TRAMP, &TARGET_MI, &TARGET_DETOUR)?;
     }
     // vSync is optional but important — without disabling it the target is ignored.
-    let q = il2cpp::class(obfstr!("UnityEngine.QualitySettings"));
+    let q = il2cpp::class("UnityEngine.QualitySettings");
     if !q.is_null() {
         unsafe {
-            let _ = hook(q, obfstr!("set_vSyncCount"), vsync_hook as *const (), &VSYNC_TRAMP, &VSYNC_MI, &VSYNC_DETOUR);
+            let _ = hook(q, "set_vSyncCount", vsync_hook as *const (), &VSYNC_TRAMP, &VSYNC_MI, &VSYNC_DETOUR);
         }
     }
     Ok(())

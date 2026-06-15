@@ -20,7 +20,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::il2cpp;
@@ -206,9 +205,7 @@ pub fn install() -> Result<(), String> {
     let mut notes: Vec<&str> = Vec::new();
 
     // #2 — UnityEngine.Screen.SetResolution_Injected (raw icall).
-    let setres = il2cpp::resolve_icall(obfstr!(
-        "UnityEngine.Screen::SetResolution_Injected(System.Int32,System.Int32,UnityEngine.FullScreenMode,UnityEngine.RefreshRate)"
-    ));
+    let setres = il2cpp::resolve_icall("UnityEngine.Screen::SetResolution_Injected(System.Int32,System.Int32,UnityEngine.FullScreenMode,UnityEngine.RefreshRate)");
     if !setres.is_null() && !unsafe { il2cpp::is_detoured(setres) } {
         if let Ok(d) = unsafe { RawDetour::new(setres as *const (), on_set_resolution as *const ()) } {
             if unsafe { d.enable() }.is_ok() {
@@ -220,17 +217,17 @@ pub fn install() -> Result<(), String> {
     }
 
     // #4 — Gallop.UIManager.ChangeResizeUIForPC + member methods (UI scale).
-    let uimgr = il2cpp::class(obfstr!("Gallop.UIManager"));
+    let uimgr = il2cpp::class("Gallop.UIManager");
     if !uimgr.is_null() {
-        M_CANVAS_LIST.store(il2cpp::method(uimgr, obfstr!("GetCanvasScalerList"), 0) as usize, Ordering::Relaxed);
+        M_CANVAS_LIST.store(il2cpp::method(uimgr, "GetCanvasScalerList", 0) as usize, Ordering::Relaxed);
         if let Some(cs) = {
-            let c = il2cpp::class(obfstr!("UnityEngine.UI.CanvasScaler"));
+            let c = il2cpp::class("UnityEngine.UI.CanvasScaler");
             if c.is_null() { None } else { Some(c) }
         } {
-            M_SET_SCALEFACTOR.store(il2cpp::method(cs, obfstr!("set_scaleFactor"), 1) as usize, Ordering::Relaxed);
+            M_SET_SCALEFACTOR.store(il2cpp::method(cs, "set_scaleFactor", 1) as usize, Ordering::Relaxed);
         }
         unsafe {
-            if il2cpp::hook_method(uimgr, obfstr!("ChangeResizeUIForPC"), 2, on_resize_ui as *const (), &TR_RESIZE, &D_RESIZE).is_ok() {
+            if il2cpp::hook_method(uimgr, "ChangeResizeUIForPC", 2, on_resize_ui as *const (), &TR_RESIZE, &D_RESIZE).is_ok() {
                 notes.push("uiscale");
             }
         }

@@ -17,7 +17,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::il2cpp;
@@ -86,16 +85,16 @@ unsafe extern "C" fn on_init(this: *mut c_void, method: *mut c_void) {
 
 /// Resolve the class + field and install the `Init` detour. Call once the runtime is ready.
 pub fn install() -> Result<(), String> {
-    let k = il2cpp::class(obfstr!("Gallop.CySpringController"));
+    let k = il2cpp::class("Gallop.CySpringController");
     if k.is_null() {
         return Err("CySpringController not found".into());
     }
-    match il2cpp::field_offset(k, obfstr!("<UpdateMode>k__BackingField")) {
+    match il2cpp::field_offset(k, "<UpdateMode>k__BackingField") {
         Some(off) => UPDATEMODE_OFF.store(off, Ordering::Relaxed),
         None => return Err("UpdateMode field not found".into()),
     }
     unsafe {
-        il2cpp::hook_method(k, obfstr!("Init"), 0, on_init as *const (), &TR_INIT, &D_INIT)?;
+        il2cpp::hook_method(k, "Init", 0, on_init as *const (), &TR_INIT, &D_INIT)?;
     }
     log("[cyspring] Init hooked (cloth physics uncap ready)");
     Ok(())

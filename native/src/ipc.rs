@@ -1,7 +1,7 @@
 //! Shared in-process state store.
 //!
-//! Everything is in-process: the native race reader writes directly here and the
-//! overlay reads from it. A plain RwLock-backed store.
+//! The native readers write directly here and the overlay reads via the
+//! accessors below. A plain RwLock-backed store — no sockets, no serialization.
 
 use crate::data::{GameState, RaceState};
 use once_cell::sync::Lazy;

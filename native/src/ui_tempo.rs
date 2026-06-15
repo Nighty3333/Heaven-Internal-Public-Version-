@@ -17,7 +17,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::il2cpp;
@@ -58,11 +57,11 @@ unsafe extern "C" fn update_hook(update_type: i32, mut dt: f32, mut idt: f32, mi
 }
 
 pub fn install() -> Result<(), String> {
-    let k = il2cpp::class(obfstr!("DG.Tweening.Core.TweenManager"));
+    let k = il2cpp::class("DG.Tweening.Core.TweenManager");
     if k.is_null() {
         return Err("TweenManager not found".into());
     }
     unsafe {
-        il2cpp::hook_method(k, obfstr!("Update"), 3, update_hook as *const (), &TRAMP, &DETOUR)
+        il2cpp::hook_method(k, "Update", 3, update_hook as *const (), &TRAMP, &DETOUR)
     }
 }

@@ -1,6 +1,7 @@
-//! In-overlay update helper for builds cloned from source. Checks the upstream
-//! git remote for new commits and can `git pull`. End users on a zip have no
-//! `.git` — the "Releases" link covers them.
+//! In-overlay update helper for dev/collaborator builds (those who clone the
+//! repo). Checks the upstream git remote for new commits and can `git pull`.
+//! End users on a zip have no `.git` — the "Releases" link covers them. This is
+//! a convenience, NOT an advantage feature, so it ships in every build.
 //!
 //! A loaded native DLL can't hot-swap itself, so `pull()` only fetches the new
 //! source; the user still rebuilds (`cargo build --release …`) and relaunches.
@@ -40,9 +41,8 @@ fn set_status(s: impl Into<String>) {
     }
 }
 
-/// Repo root for the running process. Release builds have no local checkout (the
-/// updater just points users at Releases), so the current directory is used; a
-/// non-existent `.git` there is handled gracefully.
+/// Repo root. Release builds have no local checkout (the updater just points
+/// users at Releases), so a non-existent root is the correct behaviour.
 fn repo_root() -> PathBuf {
     PathBuf::from(".")
 }

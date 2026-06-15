@@ -1,4 +1,4 @@
-//! Native IL2CPP binding layer.
+//! Heaven — native IL2CPP binding layer.
 //!
 //! Resolve the `il2cpp_*` C API exported by GameAssembly.dll via GetProcAddress,
 //! then walk domain → assemblies → image → class → method/field entirely

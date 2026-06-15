@@ -24,7 +24,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
-use obfstr::obfstr;
 use retour::RawDetour;
 
 use crate::il2cpp;
@@ -157,23 +156,23 @@ unsafe extern "C" fn on_apply_quality(this: *mut c_void, quality: i32, force: bo
 
 /// Resolve `GraphicSettings` + `QualitySettings` and install the quality hook.
 pub fn install() -> Result<(), String> {
-    let k = il2cpp::class(obfstr!("Gallop.GraphicSettings"));
+    let k = il2cpp::class("Gallop.GraphicSettings");
     if k.is_null() {
         return Err("GraphicSettings not found".into());
     }
     unsafe {
-        il2cpp::hook_method(k, obfstr!("ApplyGraphicsQuality"), 2, on_apply_quality as *const (), &TR_AGQ, &D_AGQ)?;
+        il2cpp::hook_method(k, "ApplyGraphicsQuality", 2, on_apply_quality as *const (), &TR_AGQ, &D_AGQ)?;
     }
     // Resolve the QualitySettings static setters for the enhancement pass (best-effort).
-    let qs = il2cpp::class(obfstr!("UnityEngine.QualitySettings"));
+    let qs = il2cpp::class("UnityEngine.QualitySettings");
     if !qs.is_null() {
-        QS_ANISO.store(il2cpp::method(qs, obfstr!("set_anisotropicFiltering"), 1) as usize, Ordering::Relaxed);
-        QS_LOD.store(il2cpp::method(qs, obfstr!("set_lodBias"), 1) as usize, Ordering::Relaxed);
-        QS_SHADOWRES.store(il2cpp::method(qs, obfstr!("set_shadowResolution"), 1) as usize, Ordering::Relaxed);
-        QS_ANTIALIAS.store(il2cpp::method(qs, obfstr!("set_antiAliasing"), 1) as usize, Ordering::Relaxed);
-        QS_SHADOWS.store(il2cpp::method(qs, obfstr!("set_shadows"), 1) as usize, Ordering::Relaxed);
-        QS_TEXLIMIT.store(il2cpp::method(qs, obfstr!("set_masterTextureLimit"), 1) as usize, Ordering::Relaxed);
-        QS_PIXELLIGHTS.store(il2cpp::method(qs, obfstr!("set_pixelLightCount"), 1) as usize, Ordering::Relaxed);
+        QS_ANISO.store(il2cpp::method(qs, "set_anisotropicFiltering", 1) as usize, Ordering::Relaxed);
+        QS_LOD.store(il2cpp::method(qs, "set_lodBias", 1) as usize, Ordering::Relaxed);
+        QS_SHADOWRES.store(il2cpp::method(qs, "set_shadowResolution", 1) as usize, Ordering::Relaxed);
+        QS_ANTIALIAS.store(il2cpp::method(qs, "set_antiAliasing", 1) as usize, Ordering::Relaxed);
+        QS_SHADOWS.store(il2cpp::method(qs, "set_shadows", 1) as usize, Ordering::Relaxed);
+        QS_TEXLIMIT.store(il2cpp::method(qs, "set_masterTextureLimit", 1) as usize, Ordering::Relaxed);
+        QS_PIXELLIGHTS.store(il2cpp::method(qs, "set_pixelLightCount", 1) as usize, Ordering::Relaxed);
     }
     log("[graphics] ApplyGraphicsQuality hooked (quality unlock + texture/shadow extras ready)");
     Ok(())

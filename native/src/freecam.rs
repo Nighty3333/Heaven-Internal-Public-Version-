@@ -1,4 +1,4 @@
-//! Heaven — race free camera (feature `freecam`).
+//! Heaven — race free camera (feature `freecam`, private build only).
 //!
 //! Clean build: only the proven mechanism. Follows the player's Uma in 3rd-person
 //! during a race. Cosmetic (results are server-side).
@@ -114,7 +114,7 @@ struct V3 {
     z: f32,
 }
 
-// ── public API (used by overlay.rs / boot.rs) ────────────────────────────────
+// ── public API (used by overlay.rs / boot.rs) ─────────────────────────────────
 pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
@@ -605,13 +605,6 @@ static M_PLAY_PCAM: AtomicUsize = AtomicUsize::new(0);
 static M_STOP_PCAM: AtomicUsize = AtomicUsize::new(0);
 static M_IS_PCAM: AtomicUsize = AtomicUsize::new(0);
 static M_GET_CUR_CAM: AtomicUsize = AtomicUsize::new(0);
-/// 1st-person now = ride the game's own Player Camera (it frames the player's Uma closely
-/// and never shows the terrain void). When true + following, we disable ALL our overrides
-/// and let the game drive the camera.
-fn game_cam_mode() -> bool {
-    false // we always drive our own 3rd-person chase while following
-}
-
 // Log the active-camera set ONLY when it changes (a camera appears/disappears) across
 // the WHOLE race, so we capture the mid-race director switches ("se cambia sola"), not
 // just the start. Each change dumps name/enabled/depth/pos + distance to the Uma.
@@ -941,7 +934,6 @@ fn drive_cam() -> bool {
     UPDATE_RACE_CAM.load(Ordering::Relaxed)
         && FOLLOW.load(Ordering::Relaxed)
         && EVER_CAP.load(Ordering::Relaxed)
-        && !game_cam_mode() // 1st-person rides the game's camera → don't override the transform
 }
 
 // Transform of RaceCourseCamera (our chase camera), cached from the set_enabled hook.
@@ -1063,7 +1055,7 @@ fn drive_this(this: *mut c_void) -> bool {
         return true;
     }
     let rt = RACE_CAM_TF.load(Ordering::Relaxed);
-    rt != 0 && this as usize == rt && following() && !game_cam_mode()
+    rt != 0 && this as usize == rt && following()
 }
 
 /// True once we're actively following the captured Uma. The cinematic-cut suppressors
@@ -1102,8 +1094,7 @@ unsafe extern "C" fn on_alter_late_update(this: *mut c_void, mi: *mut c_void) {
             let f: VoidM = std::mem::transmute(db);
             f(this, std::ptr::null_mut());
         }
-        // 1st-person → ride the game's Player Camera (start it once; the game frames our
-        // Uma closely with no void). 3rd-person → make sure it's stopped.
+        // 3rd-person → make sure the game's Player Camera is stopped if it happens to be on.
         let is_p = M_IS_PCAM.load(Ordering::Relaxed);
         let playing = if is_p != 0 {
             let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool = std::mem::transmute(is_p);
@@ -1111,44 +1102,7 @@ unsafe extern "C" fn on_alter_late_update(this: *mut c_void, mi: *mut c_void) {
         } else {
             false
         };
-        if game_cam_mode() {
-            if !playing {
-                let pp = M_PLAY_PCAM.load(Ordering::Relaxed);
-                if pp != 0 {
-                    let f: VoidM = std::mem::transmute(pp);
-                    f(this, std::ptr::null_mut());
-                    flog("[freecam] PlayPlayerCamera (1st-person rides game cam)");
-                }
-            }
-            // DIAGNOSTIC: measure the game camera's framing vs the Uma (to replicate it as a
-            // movable cam + eyes mode). Active camera name + pos + height + dist + fov.
-            if FX_FRAME.load(Ordering::Relaxed) % 20 == 0 {
-                let gc = M_GET_CUR_CAM.load(Ordering::Relaxed);
-                let gn = OBJ_GETNAME_ICALL.load(Ordering::Relaxed);
-                let gt = COMP_GET_TF.load(Ordering::Relaxed);
-                let gp = GET_POS_ICALL.load(Ordering::Relaxed);
-                let gf = CAM_GET_FOV.load(Ordering::Relaxed);
-                if gc != 0 && gt != 0 && gp != 0 {
-                    let fcam: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void = std::mem::transmute(gc);
-                    let cam = fcam(this, std::ptr::null_mut());
-                    if !cam.is_null() {
-                        let name = if gn != 0 { let fnm: unsafe extern "C" fn(*mut c_void) -> *mut c_void = std::mem::transmute(gn); il2cpp::read_string(fnm(cam)) } else { String::new() };
-                        let fov = if gf != 0 { let ff: unsafe extern "C" fn(*mut c_void, *mut c_void) -> f32 = std::mem::transmute(gf); ff(cam, std::ptr::null_mut()) } else { 0.0 };
-                        let ftf: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void = std::mem::transmute(gt);
-                        let tf = ftf(cam, COMP_GET_TF_MI.load(Ordering::Relaxed) as *mut c_void);
-                        if !tf.is_null() {
-                            let fpos: unsafe extern "C" fn(*mut c_void, *mut V3) = std::mem::transmute(gp);
-                            let mut p = V3 { x: 0.0, y: 0.0, z: 0.0 };
-                            fpos(tf, &mut p);
-                            let (ux, uy, uz) = (getf(&TPX), getf(&TPY), getf(&TPZ));
-                            let (dx, dy, dz) = (p.x - ux, p.y - uy, p.z - uz);
-                            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                            flog(&format!("[freecam] PCAM '{name}' fov={fov:.0} camY-umaY={dy:.1} dist={dist:.1} tpx={ux:.0}"));
-                        }
-                    }
-                }
-            }
-        } else if playing {
+        if playing {
             let sp = M_STOP_PCAM.load(Ordering::Relaxed);
             if sp != 0 {
                 let f: VoidM = std::mem::transmute(sp);
@@ -1182,7 +1136,7 @@ unsafe extern "C" fn on_view_late_update(this: *mut c_void, mi: *mut c_void) {
 // ~0-3° for dramatic close-ups after skills. Force OUR camera's FOV to a steady value
 // (only RaceCourseCamera, by cached object ptr → other cameras / cut-ins untouched).
 unsafe extern "C" fn on_unity_get_fov(this: *mut c_void, mi: *mut c_void) -> f32 {
-    if following() && !game_cam_mode() {
+    if following() {
         let rc = RACE_CAM_OBJ.load(Ordering::Relaxed);
         if rc != 0 && this as usize == rc {
             // one-shot component dump + clear-mode apply (guaranteed call site: this hook
@@ -1208,7 +1162,7 @@ unsafe extern "C" fn on_unity_get_fov(this: *mut c_void, mi: *mut c_void) -> f32
 // Skill cut-in cameras (CutIn*, EffectCamera) are untouched → the skill still plays.
 unsafe extern "C" fn on_set_enabled(this: *mut c_void, value: bool, mi: *mut c_void) {
     let mut v = value;
-    if following() && !game_cam_mode() && !this.is_null() {
+    if following() && !this.is_null() {
         let gn = OBJ_GETNAME_ICALL.load(Ordering::Relaxed);
         if gn != 0 {
             let f_name: unsafe extern "C" fn(*mut c_void) -> *mut c_void = std::mem::transmute(gn);
@@ -1329,7 +1283,7 @@ unsafe extern "C" fn on_change_cam_mode(this: *mut c_void, mode: i64, arg2: i64,
     if LAST_CAM_MODE.swap(mode, Ordering::Relaxed) != mode {
         flog(&format!("[freecam] ChangeCameraMode mode={mode} arg2={arg2} tpx={:.0} follow={}", getf(&TPX), following()));
     }
-    if following() && !game_cam_mode() {
+    if following() {
         return;
     }
     let t = TR_CMODE.load(Ordering::Relaxed);
@@ -1350,7 +1304,7 @@ unsafe extern "C" fn on_play_event_camera(
     a4: *mut c_void,
     mi: *mut c_void,
 ) -> bool {
-    if following() && !game_cam_mode() {
+    if following() {
         return false;
     }
     let t = TR_PEC.load(Ordering::Relaxed);

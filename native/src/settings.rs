@@ -1,8 +1,8 @@
-//! Persistent overlay settings.
+//! Heaven — persistent overlay settings.
 //!
-//! The DLL persists its own UI/toggle state to a small JSON
-//! file. Loaded once at boot (after modules install) and re-saved whenever the
-//! user changes a control in the overlay — so choices stick across sessions.
+//! The DLL persists its own UI/toggle state to a small JSON file. Loaded once at
+//! boot (after modules install) and re-saved whenever the user changes a control
+//! in the overlay — so choices stick across sessions.
 //!
 //! Defaults (first run): Training + Events skip ON, Race-result OFF, FPS Off,
 //! rail docked to the right edge.
@@ -51,7 +51,7 @@ pub struct Settings {
     pub energy_y: f32,
     pub bonds_only: bool,
     pub tt_capture: bool,
-    // Reserved on/off flags kept for forward-compatible settings JSON.
+    // Reserved settings flags; kept so the JSON stays stable across builds.
     #[serde(default)]
     pub show_career: bool,
     #[serde(default)]
@@ -64,6 +64,9 @@ pub struct Settings {
     // Index into the overlay's menu-key list (which key toggles the menu). 0 = Insert.
     #[serde(default)]
     pub toggle_key: u32,
+    // Whether the first-launch "press <key> to open" hint has been seen/dismissed.
+    #[serde(default)]
+    pub seen_hint: bool,
     // Uncap the character cloth/hair (spring-bone) physics update rate (cosmetic).
     #[serde(default)]
     pub cyspring_uncap: bool,
@@ -151,6 +154,7 @@ impl Default for Settings {
             show_energy: false,
             menu_centered: true,
             toggle_key: 0,
+            seen_hint: false,
             cyspring_uncap: false,
             gfx_quality: false,
             gfx_extras: false,
@@ -283,6 +287,17 @@ pub fn set_toggle_key(idx: u32) {
     }
 }
 
+/// Whether the first-launch "press <key> to open the menu" hint has been seen.
+pub fn seen_hint() -> bool {
+    cache().lock().map(|c| c.seen_hint).unwrap_or(false)
+}
+pub fn set_seen_hint(on: bool) {
+    if let Ok(mut c) = cache().lock() {
+        c.seen_hint = on;
+        write_file(&c);
+    }
+}
+
 /// Whether the cloth/hair (spring-bone) physics update rate is uncapped.
 pub fn cyspring_uncap() -> bool {
     cache().lock().map(|c| c.cyspring_uncap).unwrap_or(false)
@@ -403,51 +418,6 @@ pub fn set_classic_menu(on: bool) {
     }
 }
 
-/// Compact "bonds-only" view-mode flag.
-pub fn bonds_only() -> bool {
-    cache().lock().map(|c| c.bonds_only).unwrap_or(false)
-}
-pub fn set_bonds_only(on: bool) {
-    if let Ok(mut c) = cache().lock() {
-        c.bonds_only = on;
-        write_file(&c);
-    }
-}
-
-/// Whether the career info readout is enabled.
-pub fn show_career() -> bool {
-    cache().lock().map(|c| c.show_career).unwrap_or(false)
-}
-pub fn set_show_career(on: bool) {
-    if let Ok(mut c) = cache().lock() {
-        c.show_career = on;
-        write_file(&c);
-    }
-}
-
-/// Whether the live Race panel is shown (it still self-hides when no race is active).
-pub fn show_race() -> bool {
-    cache().lock().map(|c| c.show_race).unwrap_or(false)
-}
-pub fn set_show_race(on: bool) {
-    if let Ok(mut c) = cache().lock() {
-        c.show_race = on;
-        write_file(&c);
-    }
-}
-
-/// Whether the floating energy readout is enabled.
-pub fn show_energy() -> bool {
-    cache().lock().map(|c| c.show_energy).unwrap_or(false)
-}
-pub fn set_show_energy(on: bool) {
-    if let Ok(mut c) = cache().lock() {
-        c.show_energy = on;
-        write_file(&c);
-    }
-}
-
-
 /// Race freecam enabled + persisted. Module call is freecam-build only.
 pub fn freecam() -> bool {
     cache().lock().map(|c| c.freecam).unwrap_or(false)
@@ -559,19 +529,5 @@ pub fn set_win_rect(key: &str, rect: [f32; 4]) {
             c.win.insert(key.to_string(), rect);
             write_file(&c);
         }
-    }
-}
-
-/// Saved screen position of the floating energy readout.
-pub fn energy_pos() -> (f32, f32) {
-    cache().lock().map(|c| (c.energy_x, c.energy_y)).unwrap_or((60.0, 60.0))
-}
-
-/// Persist the floating energy readout position (called after the user drags it).
-pub fn set_energy_pos(x: f32, y: f32) {
-    if let Ok(mut c) = cache().lock() {
-        c.energy_x = x;
-        c.energy_y = y;
-        write_file(&c);
     }
 }

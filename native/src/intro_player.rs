@@ -18,8 +18,8 @@
 //!      backs up / restores the GAME's device state around the whole imgui pass, so
 //!      the game itself is never corrupted by our draw.
 //!
-//! The packed frame file lives next to the DLL and is supplied by the user.
-//! Gated on the `banner` feature.
+//! Local-only (Cygames IP): the packed frame file lives next to the DLL and is
+//! never bundled or committed. Private build only (`banner`).
 
 #![allow(dead_code)]
 
