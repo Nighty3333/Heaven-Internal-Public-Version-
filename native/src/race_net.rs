@@ -116,10 +116,33 @@ unsafe fn on_response(ret: *mut c_void) {
     }
     let data = (ret as *mut u8).add(0x20);
     let slice = std::slice::from_raw_parts(data, len);
-    if !contains(slice, obfstr::obfstr!("race_horse_data").as_bytes()) {
+    let has_race = contains(slice, obfstr::obfstr!("race_horse_data").as_bytes());
+    let has_cont = contains(slice, obfstr::obfstr!("available_continue_num").as_bytes());
+    if !has_race && !has_cont {
         return;
     }
-    parse_race(&slice.to_vec());
+    let bytes = slice.to_vec();
+    if has_race {
+        parse_race(&bytes);
+    }
+    if has_cont {
+        parse_continues(&bytes);
+    }
+}
+
+/// Read `available_continue_num` (remaining race retries) from a career response and
+/// publish it, so the race-result skip can auto-advance once no retries remain.
+fn parse_continues(bytes: &[u8]) {
+    let mut cur = std::io::Cursor::new(bytes);
+    let val = match rmpv::decode::read_value(&mut cur) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let mut hits: Vec<&Value> = Vec::new();
+    find_key(&val, obfstr::obfstr!("available_continue_num"), &mut hits);
+    if let Some(n) = hits.first().and_then(|v| v.as_i64()) {
+        crate::race::set_continues_available(n as i32);
+    }
 }
 
 unsafe extern "C" fn hook_static(arg0: *mut c_void, m: *const c_void) -> *mut c_void {

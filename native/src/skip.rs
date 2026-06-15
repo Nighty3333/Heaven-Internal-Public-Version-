@@ -245,11 +245,14 @@ fn rr_should_advance() -> bool {
     if IN_TEAM_TRIALS.load(Ordering::Relaxed) {
         return false;
     }
-    // Only auto-advance when the player WON (placement 1). The placement comes from
-    // the race reader, fed by race_net.
+    // Auto-advance when the player WON (placement 1), OR when no race retries remain
+    // (`available_continue_num` == 0): a retry isn't possible, so don't hold the result
+    // screen on a loss. continues == -1 means "unknown" → fall back to the win-only gate.
     #[cfg(feature = "raceread")]
     {
-        crate::race::player_finish_order() == 1
+        let won = crate::race::player_finish_order() == 1;
+        let no_retries_left = crate::race::continues_available() == 0;
+        won || no_retries_left
     }
     #[cfg(not(feature = "raceread"))]
     {

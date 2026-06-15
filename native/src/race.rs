@@ -91,6 +91,20 @@ pub fn player_finish_order() -> i32 {
     PLAYER_FINISH_ORDER.load(Ordering::Relaxed)
 }
 
+// ── remaining race retries ("continues") ────────────────────────────────────
+// `available_continue_num` from the career response: how many times you can still
+// retry a lost race. -1 = unknown. Lets the race-result skip auto-advance even on a
+// LOSS once no retries remain (no point holding for a retry you can't do).
+static CONTINUES: AtomicI32 = AtomicI32::new(-1);
+/// Remaining race retries. -1 until a career response reports it.
+pub fn continues_available() -> i32 {
+    CONTINUES.load(Ordering::Relaxed)
+}
+/// Published by the response hook when a career payload reports available_continue_num.
+pub fn set_continues_available(n: i32) {
+    CONTINUES.store(n, Ordering::Relaxed);
+}
+
 // Player's horse identity from the msgpack race response (published by the
 // DecompressResponse hook). The player is the only horse with viewer_id != 0;
 // its `frame_order - 1` is the sim horse index used to index the result array.
