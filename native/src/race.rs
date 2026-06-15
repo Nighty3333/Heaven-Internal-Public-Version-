@@ -261,6 +261,7 @@ slot!(TR_FRAME, D_FRAME);
 slot!(TR_IMPORT, D_IMPORT);
 slot!(TR_POST, D_POST);
 slot!(TR_PLAYER, D_PLAYER);
+slot!(TR_RTEXP, D_RTEXP);
 
 type VoidM = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type FrameM = unsafe extern "C" fn(*mut c_void, i32, *mut c_void) -> *mut c_void;
@@ -398,6 +399,22 @@ unsafe extern "C" fn on_player(this: *mut c_void, m: *mut c_void) -> i32 {
     idx
 }
 
+// RaceInfo.get_RaceTrackId → int. Fires whenever the race's track id is read —
+// including SKIPPED races (where RaceManager is never built), so it's the reliable
+// "a race exists" signal for the JSON export. We forward `this` (the RaceInfo) to
+// the exporter (which no-ops unless enabled + a genuinely new race), then return
+// the original value. Heaven's own track-id reads route through here transparently.
+unsafe extern "C" fn on_rt_export(this: *mut c_void, m: *mut c_void) -> i32 {
+    crate::race_export::maybe_dump(this);
+    let t = TR_RTEXP.load(Ordering::Relaxed);
+    if t != 0 {
+        let f: IntM = std::mem::transmute(t);
+        f(this, m)
+    } else {
+        0
+    }
+}
+
 unsafe fn hook(
     klass: il2cpp::Class,
     name: &str,
@@ -479,6 +496,13 @@ pub fn install() -> String {
         }
         if M_RACEINFO.load(Ordering::Relaxed) != 0 {
             got.push("header");
+        }
+        // Per-race JSON export: detour RaceInfo.get_RaceTrackId (fires on every race,
+        // incl. skipped ones). The exporter no-ops unless its toggle is on.
+        if !ri.is_null()
+            && hook(ri, "get_RaceTrackId", 0, on_rt_export as *const (), &TR_RTEXP, &D_RTEXP)
+        {
+            got.push("export");
         }
     }
     format!("hooks=[{}]", got.join(","))

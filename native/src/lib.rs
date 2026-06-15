@@ -33,6 +33,9 @@ mod paths;
 // needs finish placement.
 #[cfg(feature = "raceread")]
 mod race;
+// Per-race JSON export (RaceInfo → disk, grouped by race type) for the web viewer.
+#[cfg(feature = "raceread")]
+mod race_export;
 // Player-horse identity from the network response (msgpack).
 #[cfg(feature = "racenet")]
 mod race_net;

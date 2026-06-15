@@ -121,6 +121,15 @@ pub fn model() -> Vec<Tab> {
                 get: crate::ui_tempo::tempo, set: crate::ui_tempo::set_tempo, unit: "x",
             }],
         },
+        Section {
+            title: "Race export",
+            icon: '\u{E7C3}',
+            blurb: "Save each race to a JSON file, grouped by type, for the web viewer.",
+            controls: vec![
+                Ctrl::Toggle { id: "rex", label: "Export races", get: crate::settings::race_export, set: crate::settings::set_race_export },
+                Ctrl::Note("Files land in heaven-races, next to the game."),
+            ],
+        },
     ];
     tabs.push(Tab { name: "Gameplay", icon: '\u{E768}', sections: gameplay });
 

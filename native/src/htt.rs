@@ -61,6 +61,10 @@ unsafe extern "C" fn tt_ctor_hook(this: *mut RawObject, response: *mut RawObject
     // (it's a career-only feature and would otherwise jam the TT result UI). Set this
     // even when capture is OFF — the guard must hold regardless of the toggle.
     crate::skip::set_in_team_trials(true);
+    // Hakuraku-format Team Trials export (independent toggle): walk the full result
+    // payload to JSON under heaven-races/Team trials. No-op unless its toggle is on.
+    #[cfg(feature = "raceread")]
+    crate::race_export::dump_team_trials(response);
     if !ENABLED.load(Ordering::Relaxed) || response.is_null() {
         return;
     }

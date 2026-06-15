@@ -96,6 +96,9 @@ pub struct Settings {
     // Race freecam enabled.
     #[serde(default)]
     pub freecam: bool,
+    // Export each race to JSON on disk (grouped by race type) for the web viewer.
+    #[serde(default)]
+    pub race_export: bool,
     // Freecam 3rd-person camera presets PER CIRCUIT (track id → named presets + which is default).
     // Captured/cycled in-race; renamed/managed in the overlay. Persisted forever.
     #[serde(default)]
@@ -168,6 +171,7 @@ impl Default for Settings {
             freecam: false,
             cam_tracks: std::collections::HashMap::new(),
             win: std::collections::HashMap::new(),
+            race_export: false,
         }
     }
 }
@@ -214,6 +218,8 @@ pub fn apply_on_boot() {
     htt::set_enabled(s.tt_capture);
     #[cfg(feature = "freecam")]
     crate::freecam::set_enabled(s.freecam);
+    #[cfg(feature = "raceread")]
+    crate::race_export::set_enabled(s.race_export);
     if let Ok(mut c) = cache().lock() {
         *c = s;
     }
@@ -427,6 +433,19 @@ pub fn set_freecam(on: bool) {
     crate::freecam::set_enabled(on);
     if let Ok(mut c) = cache().lock() {
         c.freecam = on;
+        write_file(&c);
+    }
+}
+
+/// Export each race to JSON on disk (grouped by race type) for the web viewer.
+pub fn race_export() -> bool {
+    cache().lock().map(|c| c.race_export).unwrap_or(false)
+}
+pub fn set_race_export(on: bool) {
+    #[cfg(feature = "raceread")]
+    crate::race_export::set_enabled(on);
+    if let Ok(mut c) = cache().lock() {
+        c.race_export = on;
         write_file(&c);
     }
 }
