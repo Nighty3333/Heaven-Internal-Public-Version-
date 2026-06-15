@@ -272,9 +272,9 @@ const START_H: f32 = 136.0;
 #[cfg(feature = "banner")]
 const LOGO_RGBA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/menu_logo.rgba"));
 #[cfg(feature = "banner")]
-const LOGO_W: f32 = 239.0;
+const LOGO_W: f32 = 600.0;
 #[cfg(feature = "banner")]
-const LOGO_H: f32 = 98.0;
+const LOGO_H: f32 = 181.0;
 // Sidebar gold crest emblem + translucent character silhouette (baked RGBA). Local art.
 #[cfg(feature = "banner")]
 const CREST_RGBA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/crest.rgba"));
