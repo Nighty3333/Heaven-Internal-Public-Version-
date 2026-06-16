@@ -128,6 +128,8 @@ hook_slot!(TR_START, D_START);
 hook_slot!(TR_PLAY, D_PLAY);
 hook_slot!(TR_MAIN, D_MAIN);
 hook_slot!(TR_TIMELINE, D_TIMELINE);
+hook_slot!(TR_TAGIN, D_TAGIN); // SingleModeMainViewTagTrainingCutInPlayer.PlayCutIn
+hook_slot!(TR_TAGOUT, D_TAGOUT); // .PlayCutInOut
 
 #[inline]
 unsafe fn call_orig(tramp: &AtomicUsize, this: *mut c_void, method: *mut c_void) {
@@ -204,6 +206,81 @@ fn try_event_skip(this: *mut c_void) {
 unsafe extern "C" fn on_start_timeline(this: *mut c_void, m: *mut c_void) {
     call_orig(&TR_TIMELINE, this, m);
     try_event_skip(this);
+}
+
+// ── TAG (friendship/rainbow) TRAINING cut-in splash ─────────────────────────
+// The "FRIENDSHIP TRAINING!" splash is SingleModeMainViewTagTrainingCutInPlayer.
+// PlayCutIn(List<SupportCardData>, Action onDone). We skip the ~1.5s animation by
+// firing the onDone callback immediately (so the turn proceeds with no splash).
+// Gated by the training-skip toggle.
+type TagInFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void);
+type TagOutFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
+
+// Strategy: let the ORIGINAL PlayCutIn run (so its setup + the later PlayCutInOut work,
+// no freeze) but fire its onDone callback EARLY (deferred to the next frame, on a clean
+// stack) so the flow advances immediately instead of waiting ~1.1s for the splash. The
+// original's own later onDone re-fires — assumed idempotent (it just unblocks the
+// execute coroutine). Net: friendship training skips ~as fast as a normal one.
+static ACTION_INVOKE: OnceLock<Invokable> = OnceLock::new(); // System.Action.Invoke
+static SET_ACTIVE: OnceLock<Invokable> = OnceLock::new(); // GameObject.SetActive(bool)
+static PENDING_TAG_CB: AtomicUsize = AtomicUsize::new(0);
+const O_TAG_ROOT: usize = 0x60; // SingleModeMainViewTagTrainingCutInPlayer._tagCutInRootObject
+
+// GameObject.SetActive takes a bool arg → fn(this, bool, MethodInfo*).
+type SetActiveFn = unsafe extern "C" fn(*mut c_void, bool, *mut c_void);
+
+unsafe fn hide_tag_visual(this: *mut c_void) {
+    if this.is_null() {
+        return;
+    }
+    let go = *((this as usize + O_TAG_ROOT) as *const *mut c_void);
+    if go.is_null() {
+        return;
+    }
+    if let Some(sa) = SET_ACTIVE.get() {
+        if sa.ok() {
+            let f: SetActiveFn = std::mem::transmute(sa.code);
+            f(go, false, sa.mi as *mut c_void);
+        }
+    }
+}
+
+unsafe extern "C" fn on_tag_play_cutin(this: *mut c_void, cards: *mut c_void, cb: *mut c_void, m: *mut c_void) {
+    let t = TR_TAGIN.load(Ordering::Relaxed);
+    if t != 0 {
+        let f: TagInFn = std::mem::transmute(t);
+        f(this, cards, cb, m); // full original flow — keeps state valid for PlayCutInOut
+    }
+    if is_enabled() && !in_heaven() && !cb.is_null() {
+        hide_tag_visual(this); // hide the "FRIENDSHIP TRAINING!" splash content (no flicker)
+        PENDING_TAG_CB.store(cb as usize, Ordering::Relaxed); // fire onDone early next frame
+        TRAIN_SKIPS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+unsafe extern "C" fn on_tag_play_cutin_out(this: *mut c_void, cb: *mut c_void, m: *mut c_void) {
+    let t = TR_TAGOUT.load(Ordering::Relaxed);
+    if t != 0 {
+        let f: TagOutFn = std::mem::transmute(t);
+        f(this, cb, m);
+    }
+    if is_enabled() && !in_heaven() && !cb.is_null() {
+        PENDING_TAG_CB.store(cb as usize, Ordering::Relaxed);
+    }
+}
+
+/// Fire the deferred tag-training onDone on a clean main-thread frame (called from the
+/// ButtonCommon.Update tick), so it isn't re-entrant with PlayCutIn.
+fn pump_pending_tag_cb() {
+    let cb = PENDING_TAG_CB.swap(0, Ordering::Relaxed);
+    if cb == 0 {
+        return;
+    }
+    if let Some(inv) = ACTION_INVOKE.get() {
+        if inv.ok() {
+            let _g = ReentryGuard::enter();
+            unsafe { inv.call_void(cb as *mut c_void) };
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -508,6 +585,7 @@ hook_slot!(TR_PUSH2, D_PUSH2);
 
 unsafe extern "C" fn on_button_update(this: *mut c_void, m: *mut c_void) {
     call_orig(&TR_UPDATE, this, m);
+    pump_pending_tag_cb(); // fire deferred friendship-splash onDone on a clean frame
     if rr_should_advance() && WINDOW_OPEN.load(Ordering::Relaxed) && !in_heaven() {
         auto_press(this);
     }
@@ -700,6 +778,24 @@ pub fn install() -> (bool, bool, String) {
                 }
             }
             training_ok = any;
+        }
+    }
+
+    // ── TAG (friendship/rainbow) TRAINING splash ── skip the "FRIENDSHIP TRAINING!"
+    //    cut-in by firing its onDone early (deferred). Shares the training-skip toggle.
+    let _ = ACTION_INVOKE.set(resolve(il2cpp::class("System.Action"), "Invoke", 0));
+    let _ = SET_ACTIVE.set(resolve(il2cpp::class("UnityEngine.GameObject"), "SetActive", 1));
+    let tag = il2cpp::class("Gallop.SingleModeMainViewTagTrainingCutInPlayer");
+    if tag.is_null() {
+        notes.push_str("tag cutin miss; ");
+    } else if !ACTION_INVOKE.get().map(|i| i.ok()).unwrap_or(false) {
+        notes.push_str("action.invoke miss; ");
+    } else {
+        unsafe {
+            if let Err(e) = install_one(tag, "PlayCutIn", 2, on_tag_play_cutin as *const (), &TR_TAGIN, &D_TAGIN) {
+                notes.push_str(&format!("{e}; "));
+            }
+            let _ = install_one(tag, "PlayCutInOut", 1, on_tag_play_cutin_out as *const (), &TR_TAGOUT, &D_TAGOUT);
         }
     }
 
