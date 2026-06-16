@@ -40,7 +40,8 @@ To uninstall: delete the 3 files.
 
 ### Skip
 - **SuperSkip** — *Events / Training / Races*, each toggleable. Calls the game's own
-  skip routines and auto-advances the post-race result screens.
+  skip routines and auto-advances the post-race result screens. Training skip also
+  skips the friendship training cut-in (the "FRIENDSHIP TRAINING!" splash).
   - **Races only auto-advances when you WON** (finished 1st). If you lost — or the
     placement isn't known yet — it stops so you can handle it manually (e.g. a retry).
   - **Races never runs during Team Trials** — it's a career (story-mode) feature only.
@@ -128,15 +129,25 @@ categories, just a plainer style.
 
 ## Updating
 
-This build does **not** auto-update. To update:
+**Heaven updates itself.** When a newer version is available, it downloads quietly in
+the background while you play. **Restart the game once** and the new version is applied
+automatically — that's it. You can see the status anytime in the menu under **Updates**
+(e.g. *"Update vX.Y.Z ready — restart to apply"*).
+
+How it works: a loaded DLL can't replace itself while the game is running, so the new
+version is staged and swapped in cleanly the next time you launch.
+
+**First time only:** if you're on an older build from *before* auto-update existed, do
+**one** manual update to get a version that has it (steps below). After that, updates are
+automatic.
+
+Manual update (only needed that first time, or if the auto-updater can't reach the
+internet):
 
 1. Open the **Releases** page:
    **https://github.com/Nighty3333/Heaven-Internal-Public-Version-/releases**
 2. Download the newest release zip.
 3. Close the game, replace the **3 DLLs** with the new ones, relaunch.
-
-(A loaded DLL can't replace itself while the game is running, so an update is always:
-download → replace files → restart.)
 
 ---
 

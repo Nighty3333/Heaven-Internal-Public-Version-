@@ -165,6 +165,11 @@ pub fn spawn() {
         settings::apply_on_boot();
         log("settings: applied persisted state");
 
+        // Self-update check (downloads a newer release DLL in the background; the
+        // version.dll proxy swaps it in on the next launch).
+        crate::update::auto_update();
+        log("auto-update: check started");
+
         // Install is done. Hooks now run on the GAME's (already-attached) threads,
         // so this boot thread no longer needs to be attached. DETACH it cleanly
         // and let it exit — leaving it attached + alive made the shutdown GC

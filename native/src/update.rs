@@ -90,6 +90,92 @@ pub fn check() {
     });
 }
 
+// ── Auto-update ─────────────────────────────────────────────────────────────
+// End users run a zip (no .git), so we self-update the binary: check the latest
+// release, download the new heaven_overlay.dll to `heaven_overlay.dll.pending`,
+// and let the version.dll proxy swap it in on the next launch (a loaded DLL can't
+// replace itself). Uses curl.exe (ships with Windows 10/11) — no extra deps.
+const API_LATEST: &str =
+    "https://api.github.com/repos/Nighty3333/Heaven-Internal-Public-Version-/releases/latest";
+
+/// "v3.3.2" / "3.3.2" → (3, 3, 2) for comparison.
+fn parse_ver(s: &str) -> (u32, u32, u32) {
+    let s = s.trim().trim_start_matches(['v', 'V']);
+    let mut it = s.split(['.', '-', '+']).map(|x| x.trim().parse::<u32>().unwrap_or(0));
+    (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
+}
+
+fn curl_bytes(args: &[&str]) -> Option<Vec<u8>> {
+    let mut c = Command::new("curl");
+    for a in args {
+        c.arg(a);
+    }
+    #[cfg(windows)]
+    c.creation_flags(NO_WINDOW);
+    c.output().ok().filter(|o| o.status.success()).map(|o| o.stdout)
+}
+
+/// Background: if a newer release exists, download its heaven_overlay.dll to
+/// `<dll dir>/heaven_overlay.dll.pending`. The proxy applies it on the next launch.
+pub fn auto_update() {
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    thread::spawn(|| {
+        let done = |s: &str| {
+            set_status(s);
+            BUSY.store(false, Ordering::SeqCst);
+        };
+        set_status("Checking for updates\u{2026}");
+        let json = match curl_bytes(&["-sL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", API_LATEST]) {
+            Some(b) => b,
+            None => return done("Update check failed"),
+        };
+        let v: serde_json::Value = match serde_json::from_slice(&json) {
+            Ok(v) => v,
+            Err(_) => return done("Update check failed"),
+        };
+        let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
+        if tag.is_empty() {
+            return done("Update check failed");
+        }
+        if parse_ver(tag) <= parse_ver(env!("CARGO_PKG_VERSION")) {
+            return done("Up to date \u{2713}");
+        }
+        let url = v
+            .get("assets")
+            .and_then(|a| a.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|a| a.get("name").and_then(|n| n.as_str()) == Some("heaven_overlay.dll"))
+                    .and_then(|a| a.get("browser_download_url"))
+                    .and_then(|u| u.as_str())
+                    .map(String::from)
+            });
+        let url = match url {
+            Some(u) => u,
+            None => return done(&format!("{tag} available \u{2014} see Releases \u{2197}")),
+        };
+        set_status(&format!("Downloading {tag}\u{2026}"));
+        let pending = crate::paths::local_file("heaven_overlay.dll.pending");
+        let pstr = pending.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&pending);
+        if curl_bytes(&["-sL", "--max-time", "300", "-o", &pstr, &url]).is_none() {
+            let _ = std::fs::remove_file(&pending);
+            return done("Download failed");
+        }
+        let ok = std::fs::read(&pending)
+            .map(|b| b.len() > 1_000_000 && b.first() == Some(&0x4D) && b.get(1) == Some(&0x5A))
+            .unwrap_or(false);
+        if ok {
+            done(&format!("Update {tag} ready \u{2014} restart to apply"));
+        } else {
+            let _ = std::fs::remove_file(&pending);
+            done("Download failed");
+        }
+    });
+}
+
 /// `git pull --ff-only` the latest source. Background thread. The user still
 /// rebuilds + relaunches (a loaded DLL can't replace itself live).
 pub fn pull() {
