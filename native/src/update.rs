@@ -13,6 +13,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -28,6 +29,7 @@ fn status_slot() -> &'static Mutex<String> {
     STATUS.get_or_init(|| Mutex::new(String::new()))
 }
 static BUSY: AtomicBool = AtomicBool::new(false);
+static LOOP_STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn status() -> String {
     status_slot().lock().map(|s| s.clone()).unwrap_or_default()
@@ -115,65 +117,83 @@ fn curl_bytes(args: &[&str]) -> Option<Vec<u8>> {
     c.output().ok().filter(|o| o.status.success()).map(|o| o.stdout)
 }
 
-/// Background: if a newer release exists, download its heaven_overlay.dll to
-/// `<dll dir>/heaven_overlay.dll.pending`. The proxy applies it on the next launch.
+/// Background: poll for a newer release every few minutes and, when one exists, download
+/// its heaven_overlay.dll to `<dll dir>/heaven_overlay.dll.pending` (the proxy applies it
+/// on the next launch). Polling stops once an update is staged — a restart is all that's
+/// left, and re-downloading the same newer build each cycle would be pointless. Started
+/// once. The interval stays under GitHub's unauthenticated API rate limit (~60/hour).
+const POLL_SECS: u64 = 300;
 pub fn auto_update() {
-    if BUSY.swap(true, Ordering::SeqCst) {
-        return;
+    if LOOP_STARTED.swap(true, Ordering::SeqCst) {
+        return; // a single polling loop per session
     }
-    thread::spawn(|| {
-        let done = |s: &str| {
-            set_status(s);
-            BUSY.store(false, Ordering::SeqCst);
-        };
-        set_status("Checking for updates\u{2026}");
-        let json = match curl_bytes(&["-sL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", API_LATEST]) {
-            Some(b) => b,
-            None => return done("Update check failed"),
-        };
-        let v: serde_json::Value = match serde_json::from_slice(&json) {
-            Ok(v) => v,
-            Err(_) => return done("Update check failed"),
-        };
-        let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
-        if tag.is_empty() {
-            return done("Update check failed");
+    thread::spawn(|| loop {
+        if check_for_update() {
+            break; // staged — nothing more to do until the next launch
         }
-        if parse_ver(tag) <= parse_ver(env!("CARGO_PKG_VERSION")) {
-            return done("Up to date \u{2713}");
-        }
-        let url = v
-            .get("assets")
-            .and_then(|a| a.as_array())
-            .and_then(|arr| {
-                arr.iter()
-                    .find(|a| a.get("name").and_then(|n| n.as_str()) == Some("heaven_overlay.dll"))
-                    .and_then(|a| a.get("browser_download_url"))
-                    .and_then(|u| u.as_str())
-                    .map(String::from)
-            });
-        let url = match url {
-            Some(u) => u,
-            None => return done(&format!("{tag} available \u{2014} see Releases \u{2197}")),
-        };
-        set_status(&format!("Downloading {tag}\u{2026}"));
-        let pending = crate::paths::local_file("heaven_overlay.dll.pending");
-        let pstr = pending.to_string_lossy().to_string();
-        let _ = std::fs::remove_file(&pending);
-        if curl_bytes(&["-sL", "--max-time", "300", "-o", &pstr, &url]).is_none() {
-            let _ = std::fs::remove_file(&pending);
-            return done("Download failed");
-        }
-        let ok = std::fs::read(&pending)
-            .map(|b| b.len() > 1_000_000 && b.first() == Some(&0x4D) && b.get(1) == Some(&0x5A))
-            .unwrap_or(false);
-        if ok {
-            done(&format!("Update {tag} ready \u{2014} restart to apply"));
-        } else {
-            let _ = std::fs::remove_file(&pending);
-            done("Download failed");
-        }
+        thread::sleep(Duration::from_secs(POLL_SECS));
     });
+}
+
+/// One update check. Returns true if a newer release was downloaded & staged (so the
+/// poller should stop), false otherwise (no update yet, transient failure, or busy).
+fn check_for_update() -> bool {
+    // If a manual check is already running, skip this cycle rather than collide.
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    let done = |s: &str, staged: bool| -> bool {
+        set_status(s);
+        BUSY.store(false, Ordering::SeqCst);
+        staged
+    };
+    set_status("Checking for updates\u{2026}");
+    let json = match curl_bytes(&["-sL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", API_LATEST]) {
+        Some(b) => b,
+        None => return done("Update check failed", false),
+    };
+    let v: serde_json::Value = match serde_json::from_slice(&json) {
+        Ok(v) => v,
+        Err(_) => return done("Update check failed", false),
+    };
+    let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
+    if tag.is_empty() {
+        return done("Update check failed", false);
+    }
+    if parse_ver(tag) <= parse_ver(env!("CARGO_PKG_VERSION")) {
+        return done("Up to date \u{2713}", false);
+    }
+    let url = v
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|a| a.get("name").and_then(|n| n.as_str()) == Some("heaven_overlay.dll"))
+                .and_then(|a| a.get("browser_download_url"))
+                .and_then(|u| u.as_str())
+                .map(String::from)
+        });
+    let url = match url {
+        Some(u) => u,
+        None => return done(&format!("{tag} available \u{2014} see Releases \u{2197}"), false),
+    };
+    set_status(&format!("Downloading {tag}\u{2026}"));
+    let pending = crate::paths::local_file("heaven_overlay.dll.pending");
+    let pstr = pending.to_string_lossy().to_string();
+    let _ = std::fs::remove_file(&pending);
+    if curl_bytes(&["-sL", "--max-time", "300", "-o", &pstr, &url]).is_none() {
+        let _ = std::fs::remove_file(&pending);
+        return done("Download failed", false);
+    }
+    let ok = std::fs::read(&pending)
+        .map(|b| b.len() > 1_000_000 && b.first() == Some(&0x4D) && b.get(1) == Some(&0x5A))
+        .unwrap_or(false);
+    if ok {
+        done(&format!("Update {tag} ready \u{2014} restart to apply"), true)
+    } else {
+        let _ = std::fs::remove_file(&pending);
+        done("Download failed", false)
+    }
 }
 
 /// `git pull --ff-only` the latest source. Background thread. The user still
