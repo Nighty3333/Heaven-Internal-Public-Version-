@@ -30,6 +30,7 @@ const EVENT_DEBOUNCE_MS: u64 = 1200;
 static SKIP_ENABLED: AtomicBool = AtomicBool::new(true); // TRAINING cut-ins
 static EVENT_ENABLED: AtomicBool = AtomicBool::new(true); // EVENT / story timelines
 static SHOP_ENABLED: AtomicBool = AtomicBool::new(true); // PRO SHOP buy/use animations
+static RIVAL_ENABLED: AtomicBool = AtomicBool::new(true); // rival-race entry "RIVAL <name>" card
 
 // Training
 pub fn set_enabled(on: bool) {
@@ -57,6 +58,13 @@ pub fn set_shop_enabled(on: bool) {
 }
 pub fn is_shop_enabled() -> bool {
     SHOP_ENABLED.load(Ordering::Relaxed)
+}
+// Rival-race entry card ("RIVAL <name>" splash before a rival race)
+pub fn set_rival_enabled(on: bool) {
+    RIVAL_ENABLED.store(on, Ordering::Relaxed);
+}
+pub fn is_rival_enabled() -> bool {
+    RIVAL_ENABLED.load(Ordering::Relaxed)
 }
 
 // ── method ABIs (this, MethodInfo*) ─────────────────────────────────────────
@@ -373,6 +381,47 @@ unsafe extern "C" fn on_movenext(this: *mut c_void, m: *mut c_void) -> bool {
     }
     DRIVING.store(false, Ordering::Relaxed);
     let _ = n;
+    false
+}
+
+// Skip the full-screen rival ENTRY cut-in (the 2D "RIVAL <name>" card shown before a rival
+// race). It is played by SingleModeRaceEntryViewController.<PlayRivalEntryCoroutine>d__103.
+// On its FIRST MoveNext (state 0) we set the state field to -1 so the body falls through to
+// the default case and renders nothing, then call DestroyRivalEntry() to clear any partial
+// visuals and invoke the coroutine's endAction so the flow proceeds straight to the race.
+// (Driving the coroutine to completion does NOT work here — its first step yields on the
+// rival model/asset load, never advancing the on-screen card; this early-skip does.)
+hook_slot!(TR_RIVALMN, D_RIVALMN);
+static DESTROY_RIVAL_ENTRY: OnceLock<Invokable> = OnceLock::new(); // SingleModeRaceEntryViewController.DestroyRivalEntry
+const O_RIVAL_STATE: usize = 0x10; // <>1__state
+const O_RIVAL_ENDACTION: usize = 0x20; // endAction (System.Action)
+const O_RIVAL_THIS: usize = 0x28; // <>4__this (SingleModeRaceEntryViewController)
+unsafe extern "C" fn on_rival_movenext(this: *mut c_void, m: *mut c_void) -> bool {
+    let t = TR_RIVALMN.load(Ordering::Relaxed);
+    if t == 0 {
+        return false;
+    }
+    let f: BoolMethodFn = std::mem::transmute(t);
+    if !is_rival_enabled() || in_heaven() || this.is_null() {
+        return f(this, m);
+    }
+    let state = *((this as usize + O_RIVAL_STATE) as *const i32);
+    if state != 0 {
+        return f(this, m); // only intercept the very first step
+    }
+    let ctrl = *((this as usize + O_RIVAL_THIS) as *const *mut c_void);
+    let end_action = *((this as usize + O_RIVAL_ENDACTION) as *const usize);
+    *((this as usize + O_RIVAL_STATE) as *mut i32) = -1; // body -> default -> returns false, no visuals
+    let _ = f(this, m);
+    if !ctrl.is_null() {
+        if let Some(inv) = DESTROY_RIVAL_ENTRY.get() {
+            if inv.ok() {
+                let _g = ReentryGuard::enter();
+                inv.call_void(ctrl);
+            }
+        }
+    }
+    fire_action(end_action); // proceed to the race
     false
 }
 
@@ -927,6 +976,32 @@ pub fn install() -> (bool, bool, String) {
             unsafe {
                 if let Err(e) = install_one(coro, "MoveNext", 0, on_movenext as *const (), &TR_MOVENEXT, &D_MOVENEXT) {
                     notes.push_str(&format!("coro movenext: {e}; "));
+                }
+            }
+        }
+    }
+
+    // ── RIVAL-RACE entry intro ("RIVAL <name>" card) — skip its coroutine on the first step ──
+    {
+        let entry = il2cpp::class("Gallop.SingleModeRaceEntryViewController");
+        if entry.is_null() {
+            notes.push_str("rival entry cls miss; ");
+        } else {
+            let _ = DESTROY_RIVAL_ENTRY.set(resolve(entry, "DestroyRivalEntry", 0));
+            if !DESTROY_RIVAL_ENTRY.get().map(|i| i.ok()).unwrap_or(false) {
+                notes.push_str("rival destroy miss; ");
+            }
+        }
+        let rcoro = il2cpp::nested_class(
+            "Gallop.SingleModeRaceEntryViewController",
+            "<PlayRivalEntryCoroutine>d__103",
+        );
+        if rcoro.is_null() {
+            notes.push_str("rival coro miss; ");
+        } else {
+            unsafe {
+                if let Err(e) = install_one(rcoro, "MoveNext", 0, on_rival_movenext as *const (), &TR_RIVALMN, &D_RIVALMN) {
+                    notes.push_str(&format!("rival movenext: {e}; "));
                 }
             }
         }

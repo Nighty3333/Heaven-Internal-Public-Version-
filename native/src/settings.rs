@@ -44,6 +44,8 @@ pub struct Settings {
     pub skip_events: bool,
     #[serde(default = "default_true")]
     pub skip_shop: bool,
+    #[serde(default = "default_true")]
+    pub skip_rival: bool,
     pub race_result: bool,
     pub fps: i32,
     #[serde(default = "default_ui_tempo")]
@@ -147,6 +149,7 @@ impl Default for Settings {
             skip_training: true,
             skip_events: true,
             skip_shop: true,
+            skip_rival: true,
             // Track the compile-time default: in builds with `races_on` (the public
             // build) race-result skip is ON out of the box. Without it persisted state
             // would force it OFF on a fresh install, so new users got no race skip.
@@ -208,6 +211,7 @@ pub fn apply_on_boot() {
     skip::set_train_enabled(s.skip_training);
     skip::set_event_enabled(s.skip_events);
     skip::set_shop_enabled(s.skip_shop);
+    skip::set_rival_enabled(s.skip_rival);
     skip::set_race_result_enabled(s.race_result);
     fps::set_cap(s.fps);
     crate::ui_tempo::set_tempo(s.ui_tempo);
@@ -257,6 +261,7 @@ pub fn save_current() {
         c.skip_training = skip::is_train_enabled();
         c.skip_events = skip::is_event_enabled();
         c.skip_shop = skip::is_shop_enabled();
+        c.skip_rival = skip::is_rival_enabled();
         c.race_result = skip::is_race_result_enabled();
         c.fps = fps::current();
         c.ui_tempo = crate::ui_tempo::tempo();

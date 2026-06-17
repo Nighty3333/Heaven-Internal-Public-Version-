@@ -111,6 +111,7 @@ pub fn model() -> Vec<Tab> {
                 Ctrl::Toggle { id: "tr", label: "Training", get: crate::skip::is_train_enabled, set: crate::skip::set_train_enabled },
                 Ctrl::Toggle { id: "rr", label: "Races (won only)", get: crate::skip::is_race_result_enabled, set: crate::skip::set_race_result_enabled },
                 Ctrl::Toggle { id: "sh", label: "Shop", get: crate::skip::is_shop_enabled, set: crate::skip::set_shop_enabled },
+                Ctrl::Toggle { id: "rv", label: "Rival intro", get: crate::skip::is_rival_enabled, set: crate::skip::set_rival_enabled },
             ],
         },
         Section {
