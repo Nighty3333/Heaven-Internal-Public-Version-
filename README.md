@@ -39,13 +39,15 @@ To uninstall: delete the 3 files.
 ## Features
 
 ### Skip
-- **SuperSkip** — *Events / Training / Races*, each toggleable. Calls the game's own
-  skip routines and auto-advances the post-race result screens. Training skip also
+- **SuperSkip** — *Events / Training / Races / Shop*, each toggleable. Calls the game's
+  own skip routines and auto-advances the post-race result screens. Training skip also
   skips the friendship training cut-in (the "FRIENDSHIP TRAINING!" splash).
   - **Races only auto-advances when you WON** (finished 1st). If you lost — or the
     placement isn't known yet — it stops so you can handle it manually (e.g. a retry).
   - **Races never runs during Team Trials** — it's a career (story-mode) feature only.
-  - Defaults: Events **ON**, Training **ON**, **Races OFF**.
+  - **Shop** skips the item-shop animations: both when you **buy** an item and when you
+    **use** one (the "Use …" effect card). Works from the shop and from the item list.
+  - Defaults: Events **ON**, Training **ON**, Races **ON**, Shop **ON**.
 - **Game speed** — speeds up the game's UI / story animations (menu opens, transitions,
   event text). Slider **1x–10x**.
 

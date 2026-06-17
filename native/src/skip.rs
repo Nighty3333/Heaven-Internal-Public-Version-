@@ -29,6 +29,7 @@ const EVENT_DEBOUNCE_MS: u64 = 1200;
 //    can toggle each leg independently (Races = race-result auto, further down).
 static SKIP_ENABLED: AtomicBool = AtomicBool::new(true); // TRAINING cut-ins
 static EVENT_ENABLED: AtomicBool = AtomicBool::new(true); // EVENT / story timelines
+static SHOP_ENABLED: AtomicBool = AtomicBool::new(true); // PRO SHOP buy/use animations
 
 // Training
 pub fn set_enabled(on: bool) {
@@ -49,6 +50,13 @@ pub fn set_event_enabled(on: bool) {
 }
 pub fn is_event_enabled() -> bool {
     EVENT_ENABLED.load(Ordering::Relaxed)
+}
+// Pro Shop (buy/use performance animations)
+pub fn set_shop_enabled(on: bool) {
+    SHOP_ENABLED.store(on, Ordering::Relaxed);
+}
+pub fn is_shop_enabled() -> bool {
+    SHOP_ENABLED.load(Ordering::Relaxed)
 }
 
 // ── method ABIs (this, MethodInfo*) ─────────────────────────────────────────
@@ -268,19 +276,104 @@ unsafe extern "C" fn on_tag_play_cutin_out(this: *mut c_void, cb: *mut c_void, m
     }
 }
 
-/// Fire the deferred tag-training onDone on a clean main-thread frame (called from the
-/// ButtonCommon.Update tick), so it isn't re-entrant with PlayCutIn.
-fn pump_pending_tag_cb() {
-    let cb = PENDING_TAG_CB.swap(0, Ordering::Relaxed);
+unsafe fn fire_action(cb: usize) {
     if cb == 0 {
         return;
     }
     if let Some(inv) = ACTION_INVOKE.get() {
         if inv.ok() {
             let _g = ReentryGuard::enter();
-            unsafe { inv.call_void(cb as *mut c_void) };
+            inv.call_void(cb as *mut c_void);
         }
     }
+}
+
+/// Fire deferred callbacks (friendship onDone + shop buy/use perf callbacks) on a clean
+/// main-thread frame (from the ButtonCommon.Update tick), avoiding re-entrancy.
+fn pump_pending_tag_cb() {
+    unsafe { fire_action(PENDING_TAG_CB.swap(0, Ordering::Relaxed)) };
+    let cbs: Vec<usize> = shop_pending().lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+    for c in cbs {
+        unsafe { fire_action(c) };
+    }
+}
+
+// ── PRO SHOP (scenario free shop) buy/use animation skip ────────────────────
+// BUY (and buy→use-now): SingleModeScenarioFreeShopViewController.PlayUseItemPerformanceCore
+// (items, Action, Action) plays the flourish; the item effect is already applied server-side,
+// so skip the visual and defer-fire its callbacks. PlayCharaMessage(Queue<Trigger>) is the
+// "Use <item>" chara card (no callback — just don't start it). USE-from-inventory: the card
+// is the PartsSingleModeScenarioFreeUseItemPerformance coroutine, which we drive to completion
+// in one frame (on_movenext) so the game does its own teardown/continuation but nothing renders.
+static SHOP_PENDING: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+fn shop_pending() -> &'static Mutex<Vec<usize>> {
+    SHOP_PENDING.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+hook_slot!(TR_SHOPPERF, D_SHOPPERF);
+type ShopPerfFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void);
+unsafe extern "C" fn on_shop_perf(this: *mut c_void, items: *mut c_void, cb1: *mut c_void, cb2: *mut c_void, m: *mut c_void) {
+    if is_shop_enabled() && !in_heaven() {
+        if let Ok(mut q) = shop_pending().lock() {
+            if !cb1.is_null() {
+                q.push(cb1 as usize);
+            }
+            if !cb2.is_null() {
+                q.push(cb2 as usize);
+            }
+        }
+        EVENT_SKIPS.fetch_add(1, Ordering::Relaxed);
+        return; // skip the visual; callbacks fire next frame
+    }
+    let t = TR_SHOPPERF.load(Ordering::Relaxed);
+    if t != 0 {
+        let f: ShopPerfFn = std::mem::transmute(t);
+        f(this, items, cb1, cb2, m);
+    }
+}
+
+hook_slot!(TR_CHARAMSG, D_CHARAMSG);
+type CharaMsgFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void);
+unsafe extern "C" fn on_chara_msg(this: *mut c_void, q: *mut c_void, m: *mut c_void) {
+    if is_shop_enabled() && !in_heaven() {
+        EVENT_SKIPS.fetch_add(1, Ordering::Relaxed);
+        return; // skip the "Use <item>" chara-message card (arg is data, not a callback)
+    }
+    let t = TR_CHARAMSG.load(Ordering::Relaxed);
+    if t != 0 {
+        let f: CharaMsgFn = std::mem::transmute(t);
+        f(this, q, m);
+    }
+}
+
+// Drive the use-item performance coroutine to completion on its first MoveNext: the game runs
+// its own cleanup (close dialogs, lift the input block) + SingleMode continuation, we just
+// collapse the inter-step visual waits so nothing renders. (External replication is impossible
+// — the continuation lives inside the coroutine.) Do NOT skip PlayUseItemPerformance itself.
+hook_slot!(TR_MOVENEXT, D_MOVENEXT);
+static DRIVING: AtomicBool = AtomicBool::new(false);
+type BoolMethodFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+unsafe extern "C" fn on_movenext(this: *mut c_void, m: *mut c_void) -> bool {
+    let t = TR_MOVENEXT.load(Ordering::Relaxed);
+    if t == 0 {
+        return false;
+    }
+    let f: BoolMethodFn = std::mem::transmute(t);
+    if !is_shop_enabled() || in_heaven() || DRIVING.load(Ordering::Relaxed) {
+        return f(this, m); // normal single step (or a step during our own drive)
+    }
+    DRIVING.store(true, Ordering::Relaxed);
+    let _g = ReentryGuard::enter();
+    let mut n = 0u32;
+    while f(this, m) {
+        n += 1;
+        if n > 2000 {
+            break;
+        }
+    }
+    DRIVING.store(false, Ordering::Relaxed);
+    let _ = n;
+    false
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -796,6 +889,46 @@ pub fn install() -> (bool, bool, String) {
                 notes.push_str(&format!("{e}; "));
             }
             let _ = install_one(tag, "PlayCutInOut", 1, on_tag_play_cutin_out as *const (), &TR_TAGOUT, &D_TAGOUT);
+        }
+    }
+
+    // ── PRO SHOP (scenario free shop) buy/use animation skip ── (own "Shop" toggle)
+    let shop = il2cpp::class("Gallop.SingleModeScenarioFreeShopViewController");
+    if shop.is_null() {
+        notes.push_str("shop ctrl miss; ");
+    } else {
+        // Chara-message popup skip (the "Use <item>" card) needs no callback plumbing.
+        unsafe {
+            if let Err(e) = install_one(shop, "PlayCharaMessage", 1, on_chara_msg as *const (), &TR_CHARAMSG, &D_CHARAMSG) {
+                notes.push_str(&format!("{e}; "));
+            }
+        }
+        // The BUY performance skip defers the original callbacks, so it needs Action.Invoke.
+        if !ACTION_INVOKE.get().map(|i| i.ok()).unwrap_or(false) {
+            notes.push_str("shop: action.invoke miss; ");
+        } else {
+            unsafe {
+                if let Err(e) = install_one(shop, "PlayUseItemPerformanceCore", 3, on_shop_perf as *const (), &TR_SHOPPERF, &D_SHOPPERF) {
+                    notes.push_str(&format!("{e}; "));
+                }
+            }
+        }
+    }
+    // Inventory use-item animation: drive its performance coroutine to completion on the first
+    // MoveNext (game does its own teardown/continuation; only the visual waits collapse).
+    {
+        let coro = il2cpp::nested_class(
+            "Gallop.PartsSingleModeScenarioFreeUseItemPerformance",
+            "<PlayUseItemPerformanceCoroutine>d__14",
+        );
+        if coro.is_null() {
+            notes.push_str("useperf coro miss; ");
+        } else {
+            unsafe {
+                if let Err(e) = install_one(coro, "MoveNext", 0, on_movenext as *const (), &TR_MOVENEXT, &D_MOVENEXT) {
+                    notes.push_str(&format!("coro movenext: {e}; "));
+                }
+            }
         }
     }
 

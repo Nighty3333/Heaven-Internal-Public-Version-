@@ -58,6 +58,7 @@ type FnMethodGetParam = unsafe extern "C" fn(Method, u32) -> *mut c_void; // Il2
 type FnTypeGetName = unsafe extern "C" fn(*mut c_void) -> *mut c_char;
 type FnStringNew = unsafe extern "C" fn(*const c_char) -> Object;
 type FnMethodGetFlags = unsafe extern "C" fn(Method, *mut u32) -> u32;
+type FnClassGetNestedTypes = unsafe extern "C" fn(Class, *mut *mut c_void) -> Class;
 
 /// Resolved bundle of the IL2CPP exports we use. Built once in `init`.
 struct Api {
@@ -87,6 +88,7 @@ struct Api {
     type_get_name: FnTypeGetName,
     string_new: FnStringNew,
     method_get_flags: FnMethodGetFlags,
+    class_get_nested_types: FnClassGetNestedTypes,
 }
 // SAFETY: the resolved code lives for the process lifetime; pointers are read-only.
 unsafe impl Send for Api {}
@@ -160,6 +162,7 @@ pub fn init() -> Result<(), &'static str> {
             type_get_name: load!(m, "il2cpp_type_get_name"),
             string_new: load!(m, "il2cpp_string_new"),
             method_get_flags: load!(m, "il2cpp_method_get_flags"),
+            class_get_nested_types: load!(m, "il2cpp_class_get_nested_types"),
         }
     };
     let _ = API.set(api);
@@ -222,6 +225,28 @@ pub fn class(full_name: &str) -> Class {
         }
         std::ptr::null_mut()
     }
+}
+
+/// Look up a NESTED class by its outer class full name + the nested simple name.
+/// `class_from_name` can't see nested types, so we enumerate the outer's nested types.
+pub fn nested_class(outer_full: &str, nested_name: &str) -> Class {
+    let outer = class(outer_full);
+    if outer.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let mut iter: *mut c_void = std::ptr::null_mut();
+        loop {
+            let k = (api().class_get_nested_types)(outer, &mut iter);
+            if k.is_null() {
+                break;
+            }
+            if class_name(k) == nested_name {
+                return k;
+            }
+        }
+    }
+    std::ptr::null_mut()
 }
 
 /// Look up a method on a class by name + argument count (-1 = any count).
