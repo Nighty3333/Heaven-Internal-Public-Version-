@@ -260,9 +260,15 @@ pub fn install() {
             rlog("[race_net] method pointer null");
             return;
         }
+        // If another mod (e.g. a translation mod like Hachimi) already hooked the same
+        // response method, DON'T bail — chain on top of it. retour relocates the existing
+        // prologue jump into our trampoline, so both hooks run: the other mod processes
+        // the response and we still observe the decompressed bytes to read the player's
+        // finish placement. Without this, race-result skip silently dies alongside Hachimi.
+        // We only READ the return value (never mutate it), so chaining is safe. If retour
+        // can't safely chain it returns Err below and we simply skip (no worse than before).
         if crate::il2cpp::is_detoured(fnptr as *const c_void) {
-            rlog("[race_net] response already detoured by another module (skipped)");
-            return;
+            rlog("[race_net] response already detoured (another mod) — chaining on top");
         }
         let det = if is_static { hook_static as *const () } else { hook_inst as *const () };
         match RawDetour::new(fnptr as *const (), det) {

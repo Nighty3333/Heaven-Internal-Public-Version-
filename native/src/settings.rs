@@ -144,7 +144,10 @@ impl Default for Settings {
         Self {
             skip_training: true,
             skip_events: true,
-            race_result: false,
+            // Track the compile-time default: in builds with `races_on` (the public
+            // build) race-result skip is ON out of the box. Without it persisted state
+            // would force it OFF on a fresh install, so new users got no race skip.
+            race_result: cfg!(feature = "races_on"),
             fps: 0,
             ui_tempo: 1.0,
             rail_right: true,

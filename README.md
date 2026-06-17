@@ -127,6 +127,14 @@ categories, just a plainer style.
 
 ---
 
+## Compatibility
+
+Heaven can run alongside Hachimi. When both are installed, Heaven yields to Hachimi
+where they would otherwise overlap, so they don't collide. Full side-by-side support is
+planned but not finalized yet, so occasional conflicts may still appear after updates.
+
+---
+
 ## Updating
 
 **Heaven updates itself.** When a newer version is available, it downloads quietly in
