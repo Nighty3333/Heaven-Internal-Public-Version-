@@ -1,0 +1,14 @@
+# Disable C/C++ assert() in vendored native deps (notably imgui-sys).
+#
+# hudhook 0.6.5's Win32 input handler can feed Dear ImGui an "alias" key (the range
+# reserved for mouse/wheel aliases) on some keyboards / media keys / IME, which trips
+# `IM_ASSERT(!IsAliasKey(key))` at imgui.cpp:1354 and ABORTS the game with a "Microsoft
+# Visual C++ Runtime Library — Assertion failed" dialog for those users. imgui-sys
+# compiles Dear ImGui WITHOUT NDEBUG, so that assert is live even in --release builds.
+#
+# Defining NDEBUG makes assert() a no-op (standard release behaviour). The stray key event
+# is then harmless (GetKeyData handles the full ImGuiKey range). Affects only the C/C++
+# deps' assertions, not Rust. Generic flag — no machine-specific data.
+[env]
+CFLAGS = "-DNDEBUG"
+CXXFLAGS = "-DNDEBUG"
