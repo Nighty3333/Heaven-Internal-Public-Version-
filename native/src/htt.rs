@@ -159,6 +159,21 @@ unsafe fn extract(response: *mut RawObject) -> Option<Value> {
         }
         let horse_arr = params.as_ref().and_then(|p| h::read_ref_ptr(p, "race_horse_data_array"));
 
+        // Track & Condition (stadium) fields for this round, read from its start
+        // params. Safe by-name reads → absent fields just come back null. These
+        // let Heaven re-populate stadium observations from the native capture
+        // (previously only the mitmproxy team_stadium/start path produced them).
+        let (race_instance_id, weather, ground_condition, season, round_seed) =
+            if let Some(p) = &params {
+                (h::read_i32(p, "race_instance_id"),
+                 h::read_i32(p, "weather"),
+                 h::read_i32(p, "ground_condition"),
+                 h::read_i32(p, "season"),
+                 h::read_i32(p, "random_seed"))
+            } else {
+                (None, None, None, None, None)
+            };
+
         let cra = match h::read_ref_ptr(&race, "chara_result_array") {
             Some(a) => a,
             None => continue,
@@ -204,6 +219,8 @@ unsafe fn extract(response: *mut RawObject) -> Option<Value> {
                 o.insert("guts".into(), json!(h::read_i32(&hd, "guts")));
                 o.insert("wiz".into(), json!(h::read_i32(&hd, "wiz")));
                 o.insert("running_style".into(), json!(h::read_i32(&hd, "running_style")));
+                // frame_order = starting gate (for stadium / Track & Condition).
+                o.insert("frame_order".into(), json!(h::read_i32(&hd, "frame_order")));
 
                 let mut owned: Vec<i32> = Vec::new();
                 if let Some(sk) = h::read_ref_ptr(&hd, "skill_array") {
@@ -226,6 +243,11 @@ unsafe fn extract(response: *mut RawObject) -> Option<Value> {
             "distance_type": distance_type,
             "team_total_score": team_total,
             "race_scenario": scenario,
+            "race_instance_id": race_instance_id,
+            "weather": weather,
+            "ground_condition": ground_condition,
+            "season": season,
+            "random_seed": round_seed,
             "charas": charas,
         }));
     }
