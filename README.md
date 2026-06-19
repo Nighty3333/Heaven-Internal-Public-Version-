@@ -39,17 +39,24 @@ To uninstall: delete the 3 files.
 ## Features
 
 ### Skip
-- **SuperSkip** — *Events / Training / Races / Shop*, each toggleable. Calls the game's
-  own skip routines and auto-advances the post-race result screens. Training skip also
+- **SuperSkip** — *Events / Training / Races / Shop / Rival intro*, each toggleable. Calls the
+  game's own skip routines and auto-advances the post-race result screens. Training skip also
   skips the friendship training cut-in (the "FRIENDSHIP TRAINING!" splash).
   - **Races only auto-advances when you WON** (finished 1st). If you lost — or the
     placement isn't known yet — it stops so you can handle it manually (e.g. a retry).
   - **Races never runs during Team Trials** — it's a career (story-mode) feature only.
   - **Shop** skips the item-shop animations: both when you **buy** an item and when you
     **use** one (the "Use …" effect card). Works from the shop and from the item list.
-  - Defaults: Events **ON**, Training **ON**, Races **ON**, Shop **ON**.
+  - **Rival intro** skips the "RIVAL &lt;name&gt;" entry card shown before a rival race.
+  - Defaults: Events **ON**, Training **ON**, Races **ON**, Shop **ON**, Rival intro **ON**.
 - **Game speed** — speeds up the game's UI / story animations (menu opens, transitions,
   event text). Slider **1x–10x**.
+
+### Free camera (races)
+A free 3rd-person chase camera you can move around during a race. **Mouse** or **← →** to
+orbit, **↑ ↓** to zoom, **I / K** to raise and lower, **`[` `]`** to switch which Uma it
+follows. Save up to 4 named angle presets **per circuit** (**P** to save the current angle,
+**O** to cycle them). View-only — it never changes the race itself.
 
 ### Performance
 - **Low Resources mode** — "potato" mode for very weak PCs: lowest 3D quality, no
@@ -79,6 +86,11 @@ reads and analyzes the captured data.
    **https://github.com/Nighty3333/Heaven**
 
 This public build only does the *capture*; the analysis lives in Heaven.
+
+### Race export
+Save each race you run to a JSON file (under a `heaven-races` folder next to the game), grouped
+by race type, for web race viewers/analysis. Enable **Export races** under **Gameplay → Race
+export**.
 
 ### Veterans export (Hakuraku)
 Export your trained Umamusume — your "veterans" — to a local file that the
