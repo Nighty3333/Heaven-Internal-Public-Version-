@@ -161,6 +161,10 @@ pub fn spawn() {
         // Runs while this boot thread is still IL2CPP-attached (scan needs it).
         log(&format!("HorseTheTrails: {}", htt::install()));
 
+        // Veterans export (Hakuraku-format trained-uma dump). Needs the same attached
+        // boot thread (it scans the assembly for the TrainedChara[] method).
+        log(&format!("veterans export: {}", crate::umas::install()));
+
         // Apply persisted toggle state (SuperSkip / Race-result / FPS / TT).
         settings::apply_on_boot();
         log("settings: applied persisted state");

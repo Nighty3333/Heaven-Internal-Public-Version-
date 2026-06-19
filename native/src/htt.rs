@@ -290,7 +290,7 @@ fn save(val: Value) {
 // Hook installation — resolve the ctor directly from the game image.
 // ---------------------------------------------------------------------------
 
-unsafe fn find_game_image() -> *mut RawImage {
+pub(crate) unsafe fn find_game_image() -> *mut RawImage {
     for n in [
         "umamusume",
         "Assembly-CSharp",

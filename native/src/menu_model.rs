@@ -129,6 +129,7 @@ pub fn model() -> Vec<Tab> {
             blurb: "Save each race to a JSON file, grouped by type, for the web viewer.",
             controls: vec![
                 Ctrl::Toggle { id: "rex", label: "Export races", get: crate::settings::race_export, set: crate::settings::set_race_export },
+                Ctrl::Toggle { id: "vex", label: "Export veterans (Hakuraku)", get: crate::settings::umas_export, set: crate::settings::set_umas_export },
                 Ctrl::Note("Files land in heaven-races, next to the game."),
             ],
         },

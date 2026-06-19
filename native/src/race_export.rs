@@ -50,6 +50,21 @@ pub fn set_enabled(on: bool) {
     ENABLED.store(on, Ordering::Relaxed);
 }
 
+/// Walk an arbitrary managed object to a JSON string via IL2CPP reflection (used by the
+/// veterans export to dump a `TrainedChara[]`). Safe to call from an attached thread;
+/// returns "null" for a null address and "<err>" on failure.
+pub fn dump_object_json(addr: usize) -> String {
+    if addr == 0 {
+        return "null".into();
+    }
+    std::panic::catch_unwind(move || unsafe {
+        let mut visited: HashSet<usize> = HashSet::new();
+        let val = convert_object(addr as *mut c_void, 0, &mut visited);
+        serde_json::to_string(&val).unwrap_or_default()
+    })
+    .unwrap_or_else(|_| "<err>".into())
+}
+
 // Cached `<SimDataBase64>k__BackingField` offset on RaceInfo. usize::MAX = unknown.
 static SIM_OFFSET: AtomicUsize = AtomicUsize::new(usize::MAX);
 // Dedup: last race we dumped (RaceInfo ptr + its SimData ptr). A race is "new" when

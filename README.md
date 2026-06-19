@@ -80,6 +80,18 @@ reads and analyzes the captured data.
 
 This public build only does the *capture*; the analysis lives in Heaven.
 
+### Veterans export (Hakuraku)
+Export your trained Umamusume — your "veterans" — to a local file that the
+[Hakuraku](https://hakuraku.moe/veterans) site reads. Enable **Export veterans (Hakuraku)**
+under **Gameplay → Race export**; the next time your trained-uma roster loads in-game, Heaven
+writes `heaven_umas/veterans.json` next to the game. Upload that file to Hakuraku.
+
+This brings the veterans export — previously provided by the **horseACT** plugin — natively
+into Heaven. Doing it inside Heaven avoids the compatibility issues that came from running both
+mods at once, integrates the feature with the rest of Heaven, and lets you keep using Hakuraku
+without needing a second tool. Included with the kind permission of **ayaliz**, the author of
+horseACT — thank you: **https://github.com/ayaliz/horseACT**
+
 ---
 
 ## Custom intro  *(optional)*
@@ -180,6 +192,9 @@ Custom intro section above).
 ## Credits & support
 
 Made by **Night DC : nighty3333**.
+
+Thanks to **ayaliz** ([horseACT](https://github.com/ayaliz/horseACT)) for kindly allowing the
+veterans export to be included in Heaven, so users can keep using Hakuraku without conflicts.
 
 If Heaven saves you time, a coffee is appreciated:
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nighty33)

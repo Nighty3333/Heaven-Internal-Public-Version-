@@ -103,6 +103,9 @@ pub struct Settings {
     // Export each race to JSON on disk (grouped by race type) for the web viewer.
     #[serde(default)]
     pub race_export: bool,
+    // Export trained "veteran" umas to heaven_umas/veterans.json (Hakuraku format).
+    #[serde(default)]
+    pub umas_export: bool,
     // Freecam 3rd-person camera presets PER CIRCUIT (track id → named presets + which is default).
     // Captured/cycled in-race; renamed/managed in the overlay. Persisted forever.
     #[serde(default)]
@@ -181,6 +184,7 @@ impl Default for Settings {
             cam_tracks: std::collections::HashMap::new(),
             win: std::collections::HashMap::new(),
             race_export: false,
+            umas_export: false,
         }
     }
 }
@@ -231,6 +235,7 @@ pub fn apply_on_boot() {
     crate::freecam::set_enabled(s.freecam);
     #[cfg(feature = "raceread")]
     crate::race_export::set_enabled(s.race_export);
+    crate::umas::set_enabled(s.umas_export);
     if let Ok(mut c) = cache().lock() {
         *c = s;
     }
@@ -459,6 +464,18 @@ pub fn set_race_export(on: bool) {
     crate::race_export::set_enabled(on);
     if let Ok(mut c) = cache().lock() {
         c.race_export = on;
+        write_file(&c);
+    }
+}
+
+/// Export trained veteran umas to heaven_umas/veterans.json (Hakuraku format).
+pub fn umas_export() -> bool {
+    cache().lock().map(|c| c.umas_export).unwrap_or(false)
+}
+pub fn set_umas_export(on: bool) {
+    crate::umas::set_enabled(on);
+    if let Ok(mut c) = cache().lock() {
+        c.umas_export = on;
         write_file(&c);
     }
 }
