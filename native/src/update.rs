@@ -13,7 +13,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -93,10 +92,9 @@ pub fn check() {
 }
 
 // ── Auto-update ─────────────────────────────────────────────────────────────
-// End users run a zip (no .git), so we self-update the binary: check the latest
-// release, download the new heaven_overlay.dll to `heaven_overlay.dll.pending`,
-// and let the version.dll proxy swap it in on the next launch (a loaded DLL can't
-// replace itself). Uses curl.exe (ships with Windows 10/11) — no extra deps.
+// End users run a zip (no .git). At startup we check the latest release and report
+// whether a newer one exists — DETECT-ONLY: Heaven never downloads or applies an update
+// on its own; the user updates manually from Releases. Uses curl.exe (Windows 10/11).
 const API_LATEST: &str =
     "https://api.github.com/repos/Nighty3333/Heaven-Internal-Public-Version-/releases/latest";
 
@@ -117,83 +115,45 @@ fn curl_bytes(args: &[&str]) -> Option<Vec<u8>> {
     c.output().ok().filter(|o| o.status.success()).map(|o| o.stdout)
 }
 
-/// Background: poll for a newer release every few minutes and, when one exists, download
-/// its heaven_overlay.dll to `<dll dir>/heaven_overlay.dll.pending` (the proxy applies it
-/// on the next launch). Polling stops once an update is staged — a restart is all that's
-/// left, and re-downloading the same newer build each cycle would be pointless. Started
-/// once. The interval stays under GitHub's unauthenticated API rate limit (~60/hour).
-const POLL_SECS: u64 = 300;
+/// DETECT-ONLY auto-update. At startup Heaven checks once whether a newer public release
+/// exists and reports it in the menu — it NEVER downloads, stages, or applies anything on
+/// its own. Updating is always a manual choice from the Releases page.
 pub fn auto_update() {
     if LOOP_STARTED.swap(true, Ordering::SeqCst) {
-        return; // a single polling loop per session
+        return; // one check per session
     }
-    thread::spawn(|| loop {
-        if check_for_update() {
-            break; // staged — nothing more to do until the next launch
-        }
-        thread::sleep(Duration::from_secs(POLL_SECS));
+    thread::spawn(|| {
+        check_for_update();
     });
 }
 
-/// One update check. Returns true if a newer release was downloaded & staged (so the
-/// poller should stop), false otherwise (no update yet, transient failure, or busy).
-fn check_for_update() -> bool {
-    // If a manual check is already running, skip this cycle rather than collide.
+/// One startup version check. Detect-only: reports whether a newer release is available.
+/// Does NOT download, stage (`.pending`), or apply anything — by design.
+fn check_for_update() {
     if BUSY.swap(true, Ordering::SeqCst) {
-        return false;
+        return;
     }
-    let done = |s: &str, staged: bool| -> bool {
+    let done = |s: &str| {
         set_status(s);
         BUSY.store(false, Ordering::SeqCst);
-        staged
     };
     set_status("Checking for updates\u{2026}");
     let json = match curl_bytes(&["-sL", "--max-time", "20", "-H", "Accept: application/vnd.github+json", API_LATEST]) {
         Some(b) => b,
-        None => return done("Update check failed", false),
+        None => return done("Update check failed"),
     };
     let v: serde_json::Value = match serde_json::from_slice(&json) {
         Ok(v) => v,
-        Err(_) => return done("Update check failed", false),
+        Err(_) => return done("Update check failed"),
     };
     let tag = v.get("tag_name").and_then(|t| t.as_str()).unwrap_or("");
     if tag.is_empty() {
-        return done("Update check failed", false);
+        return done("Update check failed");
     }
     if parse_ver(tag) <= parse_ver(env!("CARGO_PKG_VERSION")) {
-        return done("Up to date \u{2713}", false);
+        return done("Up to date \u{2713}");
     }
-    let url = v
-        .get("assets")
-        .and_then(|a| a.as_array())
-        .and_then(|arr| {
-            arr.iter()
-                .find(|a| a.get("name").and_then(|n| n.as_str()) == Some("heaven_overlay.dll"))
-                .and_then(|a| a.get("browser_download_url"))
-                .and_then(|u| u.as_str())
-                .map(String::from)
-        });
-    let url = match url {
-        Some(u) => u,
-        None => return done(&format!("{tag} available \u{2014} see Releases \u{2197}"), false),
-    };
-    set_status(&format!("Downloading {tag}\u{2026}"));
-    let pending = crate::paths::local_file("heaven_overlay.dll.pending");
-    let pstr = pending.to_string_lossy().to_string();
-    let _ = std::fs::remove_file(&pending);
-    if curl_bytes(&["-sL", "--max-time", "300", "-o", &pstr, &url]).is_none() {
-        let _ = std::fs::remove_file(&pending);
-        return done("Download failed", false);
-    }
-    let ok = std::fs::read(&pending)
-        .map(|b| b.len() > 1_000_000 && b.first() == Some(&0x4D) && b.get(1) == Some(&0x5A))
-        .unwrap_or(false);
-    if ok {
-        done(&format!("Update {tag} ready \u{2014} restart to apply"), true)
-    } else {
-        let _ = std::fs::remove_file(&pending);
-        done("Download failed", false)
-    }
+    done(&format!("Update {tag} available \u{2014} get it from Releases \u{2197}"));
 }
 
 /// `git pull --ff-only` the latest source. Background thread. The user still
