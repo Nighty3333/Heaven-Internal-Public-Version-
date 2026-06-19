@@ -505,6 +505,25 @@ fn is_multi(name: &str) -> bool {
         || name == "ButtonCenter"
 }
 
+/// Gate the auto-press by context. When the skip is advancing a LOSS only because race
+/// retries are exhausted (`continues == 0`), the result screen's retry is a paid
+/// "buy an alarm clock" purchase — and the generic dialog taps (ButtonCenter / ScreenTap /
+/// ButtonCommon / TouchSprite) or ContinueButton can land on that purchase confirmation /
+/// the server round-trip, spending Carats and desyncing the game (bounce to title). In that
+/// one case we press ONLY the explicit result-advance button. A win (or a loss with retries
+/// still left) uses the full whitelist as before — those screens have no purchase dialog.
+fn press_allowed(name: &str) -> bool {
+    #[cfg(feature = "raceread")]
+    {
+        let won = crate::race::player_finish_order() == 1;
+        let retries_exhausted = crate::race::continues_available() == 0;
+        if !won && retries_exhausted {
+            return name == "NextButton" || name == "SingleModeNextButton";
+        }
+    }
+    is_press_target(name)
+}
+
 /// Append a line to the native engine log (race-result diagnostics).
 fn rr_log(msg: &str) {
     use std::io::Write;
@@ -631,7 +650,7 @@ fn auto_press(this: *mut c_void) {
         return;
     }
     let name = button_name(this);
-    if !is_press_target(&name) {
+    if !press_allowed(&name) {
         return;
     }
     let key = this as usize;
