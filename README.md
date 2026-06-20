@@ -8,6 +8,11 @@ Python, no extra process. Open the game and press **Insert** for the menu.
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/nighty33)
 
+> **Disclaimer.** Heaven is an unofficial third-party tool that runs inside the game. Like
+> any mod that touches the game — Hachimi included — using it is against the game's Terms of
+> Service and carries a small but real risk of an account ban. Use it at your own risk; you
+> alone are responsible for how you use it.
+
 ---
 
 ## Install
@@ -163,25 +168,16 @@ planned but not finalized yet, so occasional conflicts may still appear after up
 
 ## Updating
 
-**Heaven updates itself.** When a newer version is available, it downloads quietly in
-the background while you play. **Restart the game once** and the new version is applied
-automatically — that's it. You can see the status anytime in the menu under **Updates**
-(e.g. *"Update vX.Y.Z ready — restart to apply"*).
+Heaven **checks for updates but never installs them.** On startup it looks once at the
+latest release; if a newer version is out it just tells you in the menu under **Updates**
+(e.g. *"Update vX.Y.Z available"*). It never downloads or changes anything on its own.
 
-How it works: a loaded DLL can't replace itself while the game is running, so the new
-version is staged and swapped in cleanly the next time you launch.
-
-**First time only:** if you're on an older build from *before* auto-update existed, do
-**one** manual update to get a version that has it (steps below). After that, updates are
-automatic.
-
-Manual update (only needed that first time, or if the auto-updater can't reach the
-internet):
+To update, do it manually:
 
 1. Open the **Releases** page:
    **https://github.com/Nighty3333/Heaven-Internal-Public-Version-/releases**
-2. Download the newest release zip.
-3. Close the game, replace the **3 DLLs** with the new ones, relaunch.
+2. Download the newest zip (`Heaven.zip`, or `Heaven+Hachimi.zip` if you run Hachimi).
+3. Close the game, replace the DLLs with the new ones, relaunch.
 
 ---
 
