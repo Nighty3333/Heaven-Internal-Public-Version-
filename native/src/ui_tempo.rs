@@ -42,7 +42,7 @@ pub fn enforce() {}
 // TweenManager.Update is a STATIC method → (updateType, deltaTime, independentTime, MethodInfo*).
 type UpdateFn = unsafe extern "C" fn(i32, f32, f32, *mut c_void);
 
-unsafe extern "C" fn update_hook(update_type: i32, mut dt: f32, mut idt: f32, mi: *mut c_void) {
+unsafe extern "C" fn update_hook(update_type: i32, mut dt: f32, idt: f32, mi: *mut c_void) {
     let t = TRAMP.load(Ordering::Relaxed);
     if t == 0 {
         return;
@@ -50,7 +50,11 @@ unsafe extern "C" fn update_hook(update_type: i32, mut dt: f32, mut idt: f32, mi
     let s = tempo();
     if s != 1.0 {
         dt *= s;
-        idt *= s;
+        // Do NOT scale `idt` (independentTime). Tweens that opt into independent time are the
+        // ones meant to run at REAL speed regardless of game speed — loading spinners, some
+        // popups, and the training stat count-up. Scaling it over-sped them and produced
+        // glitches (e.g. the "+00" stat-gain counters at high speed). The rest of the UI uses
+        // dt and still speeds up.
     }
     let f: UpdateFn = std::mem::transmute(t);
     f(update_type, dt, idt, mi);
