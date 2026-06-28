@@ -60,6 +60,7 @@ pub enum Ctrl {
 pub enum Custom {
     Fps,             // tri-state cap / unlimited / slider + live readout
     Freecam,         // enable + follow controls + preset manager
+    KeyBinds,        // rebindable freecam key bindings
     TeamTrials,      // capture toggle + "N saved" count
     Intro,           // intro status + replay button
     Updates,         // version + check/pull/releases
@@ -140,14 +141,46 @@ pub fn model() -> Vec<Tab> {
     // ── 2) CAMERA ────────────────────────────────────────────────────────────
     #[cfg(feature = "freecam")]
     tabs.push(Tab {
-        name: "Camera",
+        name: "Race Director",
         icon: '\u{E722}',
-        sections: vec![Section {
-            title: "Free camera",
-            icon: '\u{E722}',
-            blurb: "3rd-person race camera with per-circuit presets.",
-            controls: vec![Ctrl::Custom(Custom::Freecam)],
-        }],
+        sections: vec![
+            // 1) Freecam — the 3rd-person camera (enable + follow + per-circuit presets). Independent
+            //    of telemetry: you can run the camera with no HUD, or the HUD with no camera.
+            Section {
+                title: "Freecam",
+                icon: '\u{E722}',
+                blurb: "3rd-person race camera with per-circuit presets.",
+                controls: vec![Ctrl::Custom(Custom::Freecam)],
+            },
+            // 2) Key bindings — rebind every freecam control.
+            Section {
+                title: "Key bindings",
+                icon: '\u{E765}',
+                blurb: "Rebind the freecam controls to any key.",
+                controls: vec![Ctrl::Custom(Custom::KeyBinds)],
+            },
+            // 3) Telemetry — the whole broadcast HUD (independent of freecam), with its panels.
+            Section {
+                title: "Telemetry",
+                icon: '\u{E9D9}',
+                blurb: "Live broadcast HUD — shows all the data during any race, freecam or not.",
+                controls: vec![
+                    Ctrl::Toggle { id: "tel", label: "Telemetry HUD", get: crate::settings::telemetry, set: crate::settings::set_telemetry },
+                    Ctrl::Toggle { id: "ttw", label: "Timing tower", get: crate::settings::tele_tower, set: crate::settings::set_tele_tower },
+                    Ctrl::Toggle { id: "twp", label: "Win probability", get: crate::settings::tele_winprob, set: crate::settings::set_tele_winprob },
+                    Ctrl::Toggle { id: "tmk", label: "Head marker (needs freecam)", get: crate::settings::tele_marker, set: crate::settings::set_tele_marker },
+                    Ctrl::Toggle { id: "tba", label: "Duel callout", get: crate::settings::tele_battle, set: crate::settings::set_tele_battle },
+                    Ctrl::Toggle { id: "tgr", label: "Grade badge", get: crate::settings::tele_grade, set: crate::settings::set_tele_grade },
+                    Ctrl::Toggle { id: "tpo", label: "Uma portrait", get: crate::settings::tele_portrait, set: crate::settings::set_tele_portrait },
+                    Ctrl::Toggle { id: "tri", label: "Rival comparison", get: crate::settings::tele_rival, set: crate::settings::set_tele_rival },
+                    Ctrl::Toggle { id: "tsk", label: "Skill feed", get: crate::settings::tele_skills, set: crate::settings::set_tele_skills },
+                    Ctrl::Toggle { id: "tpa", label: "Pace trace", get: crate::settings::tele_pace, set: crate::settings::set_tele_pace },
+                    Ctrl::SliderF32 { id: "tsc", label: "HUD scale", min: 0.6, max: 2.0, get: crate::settings::tele_scale, set: crate::settings::set_tele_scale, unit: "x" },
+                    Ctrl::Button { id: "tpb", label: "Broadcast preset (clean)", action: crate::settings::tele_preset_broadcast },
+                    Ctrl::Button { id: "tpf", label: "Full preset", action: crate::settings::tele_preset_full },
+                ],
+            },
+        ],
     });
 
     // ── 3) VISUALS ───────────────────────────────────────────────────────────
@@ -259,6 +292,8 @@ pub fn model() -> Vec<Tab> {
             Ctrl::Note("Writes heaven-logs/heaven-diag.txt next to the game — send that file."),
         ],
     });
+    // Dev-only capture toggles (net capture / geom capture) intentionally NOT here —
+    // they live in the the extra tab tab where the rest of the RE tooling is.
     tabs.push(Tab { name: "About", icon: '\u{E946}', sections: about });
 
     tabs

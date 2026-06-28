@@ -2,7 +2,7 @@
 //!
 //! With no Python host, the DLL persists its own UI/toggle state to a small JSON
 //! file. Loaded once at boot (after modules install) and re-saved whenever the
-//! user changes a control in the overlay — so your settings stick across sessions.
+//! user changes a control in the overlay — so predictions stick across sessions.
 //!
 //! Defaults (first run): Training + Events skip ON, Race-result OFF, FPS Off,
 //! rail docked to the right edge.
@@ -55,7 +55,8 @@ pub struct Settings {
     pub energy_y: f32,
     pub bonds_only: bool,
     pub tt_capture: bool,
-    // Persisted UI toggles. Default OFF.
+    // Info panels: all OFF by default — the shipped overlay shows only the
+    // Controls panel. Users opt in to Career/Race/Energy from the PANELS section.
     #[serde(default)]
     pub show_career: bool,
     #[serde(default)]
@@ -97,13 +98,41 @@ pub struct Settings {
     // Use the classic "Controls" rail menu instead of the premium sidebar menu.
     #[serde(default)]
     pub classic_menu: bool,
-    // Persisted overlay setting; the field is
+    // Event the full build (prediction) enabled. Private/the full build build only; the field is
     // always present so the JSON stays stable across builds.
     #[serde(default)]
     pub oracle: bool,
     // Race freecam enabled.
     #[serde(default)]
     pub freecam: bool,
+    // Broadcast telemetry HUD enabled — INDEPENDENT of freecam: shows all the live data during any
+    // race whether or not the freecam is following a Uma. Default ON.
+    #[serde(default = "default_true")]
+    pub telemetry: bool,
+    // Telemetry HUD — modular per-section toggles (default ON = old behavior) + HUD scale.
+    // The skill feed is the big one (it grows the window) — `tele_skills` toggles it.
+    #[serde(default = "default_true")]
+    pub tele_grade: bool,
+    #[serde(default = "default_true")]
+    pub tele_portrait: bool,
+    #[serde(default = "default_true")]
+    pub tele_rival: bool,
+    #[serde(default = "default_true")]
+    pub tele_skills: bool,
+    // Broadcast timing tower — the whole field, F1-style. Default ON.
+    #[serde(default = "default_true")]
+    pub tele_tower: bool,
+    // Broadcast panels (all default ON): win-probability, pace trace, battle callout, head marker.
+    #[serde(default = "default_true")]
+    pub tele_winprob: bool,
+    #[serde(default = "default_true")]
+    pub tele_pace: bool,
+    #[serde(default = "default_true")]
+    pub tele_battle: bool,
+    #[serde(default = "default_true")]
+    pub tele_marker: bool,
+    #[serde(default = "default_one_f32")]
+    pub tele_scale: f32,
     // Export each race to JSON on disk (grouped by race type) for the web viewer.
     #[serde(default)]
     pub race_export: bool,
@@ -118,6 +147,16 @@ pub struct Settings {
     // at that size/position forever.
     #[serde(default)]
     pub win: std::collections::HashMap<String, [f32; 4]>,
+    // Race Director / freecam key binds — Win32 VK codes, indexed by RdKey (see overlay). Rebindable
+    // in the menu like the menu-open key. Missing/short → defaults fill in.
+    #[serde(default = "default_rd_keys")]
+    pub rd_keys: Vec<i32>,
+}
+
+/// Default Race Director key binds (VK codes), in RdKey order: orbit L/R, zoom in/out, height up/down,
+/// prev/next Uma, cycle preset, save preset, toggle first-person.
+pub fn default_rd_keys() -> Vec<i32> {
+    vec![0x25, 0x27, 0x26, 0x28, 0x49, 0x4B, 0xDB, 0xDD, 0x4F, 0x50, 0x56]
 }
 
 /// A named 3rd-person chase pose.
@@ -186,10 +225,22 @@ impl Default for Settings {
             classic_menu: false,
             oracle: false,
             freecam: false,
+            telemetry: true,
+            tele_grade: true,
+            tele_portrait: true,
+            tele_rival: true,
+            tele_skills: true,
+            tele_tower: true,
+            tele_winprob: true,
+            tele_pace: true,
+            tele_battle: true,
+            tele_marker: true,
+            tele_scale: 1.0,
             cam_tracks: std::collections::HashMap::new(),
             win: std::collections::HashMap::new(),
             race_export: false,
             umas_export: false,
+            rd_keys: default_rd_keys(),
         }
     }
 }
@@ -312,6 +363,30 @@ pub fn toggle_key() -> u32 {
 pub fn set_toggle_key(idx: u32) {
     if let Ok(mut c) = cache().lock() {
         c.toggle_key = idx;
+        write_file(&c);
+    }
+}
+
+/// Race Director / freecam key bind (Win32 VK code) for action `i` (RdKey order). Falls back to the
+/// built-in default if the saved list is missing/short.
+pub fn rd_key(i: usize) -> i32 {
+    cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.rd_keys.get(i).copied())
+        .unwrap_or_else(|| default_rd_keys().get(i).copied().unwrap_or(0))
+}
+
+/// Rebind Race Director action `i` to VK code `vk` (persisted).
+pub fn set_rd_key(i: usize, vk: i32) {
+    if let Ok(mut c) = cache().lock() {
+        let def = default_rd_keys();
+        if c.rd_keys.len() < def.len() {
+            c.rd_keys = def; // backfill an old/short saved list before editing
+        }
+        if let Some(slot) = c.rd_keys.get_mut(i) {
+            *slot = vk;
+        }
         write_file(&c);
     }
 }
@@ -491,7 +566,7 @@ pub fn set_show_energy(on: bool) {
     }
 }
 
-/// Persisted overlay setting.
+/// Event the full build (prediction) enabled + persisted. Module call is the full build-build only.
 pub fn oracle() -> bool {
     cache().lock().map(|c| c.oracle).unwrap_or(false)
 }
@@ -511,6 +586,52 @@ pub fn set_freecam(on: bool) {
     crate::freecam::set_enabled(on);
     if let Ok(mut c) = cache().lock() {
         c.freecam = on;
+        write_file(&c);
+    }
+}
+
+// ── Telemetry HUD — modular section toggles + scale + presets ────────────────
+/// Master telemetry-HUD toggle (independent of freecam).
+pub fn telemetry() -> bool { cache().lock().map(|c| c.telemetry).unwrap_or(true) }
+pub fn set_telemetry(on: bool) {
+    if let Ok(mut c) = cache().lock() { c.telemetry = on; write_file(&c); }
+}
+pub fn tele_grade() -> bool { cache().lock().map(|c| c.tele_grade).unwrap_or(true) }
+pub fn tele_portrait() -> bool { cache().lock().map(|c| c.tele_portrait).unwrap_or(true) }
+pub fn tele_rival() -> bool { cache().lock().map(|c| c.tele_rival).unwrap_or(true) }
+pub fn tele_skills() -> bool { cache().lock().map(|c| c.tele_skills).unwrap_or(true) }
+pub fn tele_tower() -> bool { cache().lock().map(|c| c.tele_tower).unwrap_or(true) }
+pub fn tele_winprob() -> bool { cache().lock().map(|c| c.tele_winprob).unwrap_or(true) }
+pub fn tele_pace() -> bool { cache().lock().map(|c| c.tele_pace).unwrap_or(true) }
+pub fn tele_battle() -> bool { cache().lock().map(|c| c.tele_battle).unwrap_or(true) }
+pub fn tele_marker() -> bool { cache().lock().map(|c| c.tele_marker).unwrap_or(true) }
+pub fn tele_scale() -> f32 { cache().lock().map(|c| c.tele_scale).unwrap_or(1.0) }
+pub fn set_tele_grade(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_grade = v; write_file(&c); } }
+pub fn set_tele_portrait(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_portrait = v; write_file(&c); } }
+pub fn set_tele_rival(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_rival = v; write_file(&c); } }
+pub fn set_tele_skills(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_skills = v; write_file(&c); } }
+pub fn set_tele_tower(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_tower = v; write_file(&c); } }
+pub fn set_tele_winprob(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_winprob = v; write_file(&c); } }
+pub fn set_tele_pace(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_pace = v; write_file(&c); } }
+pub fn set_tele_battle(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_battle = v; write_file(&c); } }
+pub fn set_tele_marker(v: bool) { if let Ok(mut c) = cache().lock() { c.tele_marker = v; write_file(&c); } }
+pub fn set_tele_scale(v: f32) { if let Ok(mut c) = cache().lock() { c.tele_scale = v.clamp(0.6, 2.0); write_file(&c); } }
+/// "Broadcast" preset — clean for showing/recording: keep the broadcast panels (tower/win/pace/
+/// callout/marker), trim the busy per-Uma extras (rival deltas + skill feed).
+pub fn tele_preset_broadcast() {
+    if let Ok(mut c) = cache().lock() {
+        c.telemetry = true; // a preset implies you want the HUD on
+        c.tele_grade = true; c.tele_portrait = true; c.tele_rival = false; c.tele_skills = false;
+        c.tele_tower = true; c.tele_winprob = true; c.tele_pace = true; c.tele_battle = true; c.tele_marker = true;
+        write_file(&c);
+    }
+}
+/// "Full" preset — every section on.
+pub fn tele_preset_full() {
+    if let Ok(mut c) = cache().lock() {
+        c.telemetry = true;
+        c.tele_grade = true; c.tele_portrait = true; c.tele_rival = true; c.tele_skills = true;
+        c.tele_tower = true; c.tele_winprob = true; c.tele_pace = true; c.tele_battle = true; c.tele_marker = true;
         write_file(&c);
     }
 }

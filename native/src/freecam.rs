@@ -97,6 +97,16 @@ const DIST_MIN: f32 = 0.1;
 const DIST_MAX: f32 = 200.0; // huge zoom-out range
 const HEIGHT_STEP: f32 = 0.08; // K height per tick
 
+// ── first-person (experimental) ───────────────────────────────────────────────
+// FP = ride the Uma: camera AT her head, looking FORWARD down the track (where the course
+// geometry exists), with a clamped look cone so you can't pan into the unrendered "void"
+// behind/beside elevated courses. Toggle with V. Reuses the follow target's pos (TP*) + forward (F*).
+static FIRST_PERSON: AtomicBool = AtomicBool::new(false);
+const FP_FWD: f32 = 1.7; // forward offset from model origin → the head
+const FP_EYE_H: f32 = 1.35; // default head/eye height in FP (I/K still adjusts)
+const FP_CONE_YAW: f32 = 1.40; // ~80° horizontal look cone (avoid the void)
+const FP_CONE_PITCH: f32 = 0.70; // ~40° vertical look cone
+
 #[inline]
 fn getf(a: &AtomicU32) -> f32 {
     f32::from_bits(a.load(Ordering::Relaxed))
@@ -114,24 +124,104 @@ struct V3 {
     z: f32,
 }
 
-// ── public API (used by overlay.rs / boot.rs) ─────────────────────
+// ── public API (used by overlay.rs / the full build.rs / boot.rs) ─────────────────────
 pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 pub fn set_enabled(on: bool) {
-    if on && !ENABLED.load(Ordering::Relaxed) {
+    let was = ENABLED.swap(on, Ordering::Relaxed);
+    if on && !was {
         reset();
+        // Mid-race ENABLE: engage the chase on the current target right away (don't wait for the
+        // next race). Re-arm capture + re-find the race camera so the hand-off is immediate.
+        if in_race() && TARGET_GATE.load(Ordering::Relaxed) > 0 {
+            EVER_CAP.store(false, Ordering::Relaxed);
+            FOLLOW.store(true, Ordering::Relaxed);
+            HAVE_TARGET.store(false, Ordering::Relaxed);
+            RACE_POSE_LOADED.store(false, Ordering::Relaxed);
+            RACE_CAM_OBJ.store(0, Ordering::Relaxed);
+            RACE_CAM_TF.store(0, Ordering::Relaxed);
+            CAMSET_HASH.store(0, Ordering::Relaxed);
+            reset_pace();
+            load_default_pose();
+        }
+    } else if !on && was {
+        // Mid-race DISABLE: stop following so drive_this()/drive_cam() go false and the game's own
+        // race camera takes back over immediately (telemetry keeps running independently).
+        FOLLOW.store(false, Ordering::Relaxed);
     }
-    ENABLED.store(on, Ordering::Relaxed);
 }
 pub fn is_follow() -> bool {
     FOLLOW.load(Ordering::Relaxed)
+}
+pub fn is_first_person() -> bool {
+    FIRST_PERSON.load(Ordering::Relaxed)
+}
+/// Toggle first-person view. On enter: re-center the look to forward + a sensible head height.
+pub fn toggle_first_person() {
+    let on = !FIRST_PERSON.fetch_xor(true, Ordering::Relaxed);
+    if on {
+        setf(&ORBIT_YAW, 0.0);
+        setf(&ORBIT_PITCH, 0.0);
+        if getf(&EYE_H) < 0.5 {
+            setf(&EYE_H, FP_EYE_H);
+        }
+    }
 }
 pub fn target_gate() -> i32 {
     TARGET_GATE.load(Ordering::Relaxed)
 }
 pub fn max_gate() -> i32 {
     MAX_GATE.load(Ordering::Relaxed).max(1)
+}
+/// Project the followed-Uma's head to imgui screen pixels (top-left origin) using the EXACT
+/// freecam pose we render with (eye/look-at/FOV) — so the marker can't drift away from her like
+/// `Camera.WorldToScreenPoint` did (that reads the game's animating cinematic camera, on a
+/// different thread). Pure math, render-thread safe. None when not following or behind the cam.
+pub fn project_head_marker(width: f32, height: f32) -> Option<(f32, f32)> {
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    if !(FOLLOW.load(Ordering::Relaxed) && EVER_CAP.load(Ordering::Relaxed)) {
+        return None;
+    }
+    let eye = current_pos();
+    let tgt = current_lookat();
+    let head = V3 { x: getf(&TPX), y: getf(&TPY) + MARK_HEAD_H, z: getf(&TPZ) };
+    let cross = |a: V3, b: V3| V3 {
+        x: a.y * b.z - a.z * b.y,
+        y: a.z * b.x - a.x * b.z,
+        z: a.x * b.y - a.y * b.x,
+    };
+    let norm = |v: V3| -> Option<V3> {
+        let n = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+        if n < 1e-4 || !n.is_finite() {
+            None
+        } else {
+            Some(V3 { x: v.x / n, y: v.y / n, z: v.z / n })
+        }
+    };
+    // camera basis (world up = +Y); right = up × forward, camUp = forward × right
+    let forward = norm(V3 { x: tgt.x - eye.x, y: tgt.y - eye.y, z: tgt.z - eye.z })?;
+    let right = norm(cross(V3 { x: 0.0, y: 1.0, z: 0.0 }, forward))?;
+    let cam_up = cross(forward, right);
+    let d = V3 { x: head.x - eye.x, y: head.y - eye.y, z: head.z - eye.z };
+    let depth = d.x * forward.x + d.y * forward.y + d.z * forward.z; // >0 = in front
+    if depth <= 0.05 {
+        return None;
+    }
+    let vx = d.x * right.x + d.y * right.y + d.z * right.z;
+    let vy = d.x * cam_up.x + d.y * cam_up.y + d.z * cam_up.z;
+    let f = 1.0 / (FOLLOW_FOV.to_radians() * 0.5).tan(); // FOLLOW_FOV = vertical FOV we render
+    let aspect = width / height;
+    let ndc_x = (f / aspect) * (vx / depth);
+    let ndc_y = f * (vy / depth);
+    if !ndc_x.is_finite() || !ndc_y.is_finite() {
+        return None;
+    }
+    let sx = (ndc_x * 0.5 + 0.5) * width;
+    let sy = (0.5 - ndc_y * 0.5) * height; // imgui top-left origin
+    Some((sx, sy))
 }
 /// Follow a different Uma (cycle the target gate by `delta`, wrapping 1..=MAX_GATE).
 /// Re-captures the new Uma; keeps the current view mode + framing.
@@ -148,23 +238,47 @@ pub fn cycle_target(delta: i32) {
     EVER_CAP.store(false, Ordering::Relaxed); // re-capture the new Uma's pos/forward
     HAVE_TARGET.store(false, Ordering::Relaxed);
     reset_skill_feed(); // switched Uma → rescan ITS activated skills
+    reset_pace();
+}
+
+/// Follow a SPECIFIC Uma directly by gate/post position (1..=MAX_GATE). The 1-9 keys use this
+/// to jump straight to a horse instead of cycling through them with `[ ]`.
+pub fn follow_gate(gate: i32) {
+    let mx = MAX_GATE.load(Ordering::Relaxed).max(1);
+    if gate < 1 || gate > mx {
+        return; // no horse at that gate this race — ignore
+    }
+    TARGET_GATE.store(gate, Ordering::Relaxed);
+    FOLLOW.store(true, Ordering::Relaxed);
+    EVER_CAP.store(false, Ordering::Relaxed);
+    HAVE_TARGET.store(false, Ordering::Relaxed);
+    reset_skill_feed();
+    reset_pace();
 }
 
 /// Called when the player's own horse is identified (from the race response). If
 /// freecam is on, auto-lock follow onto the player at a good default chase pose.
 pub fn auto_follow_player(gate: i32) {
-    if !ENABLED.load(Ordering::Relaxed) || gate <= 0 {
+    if gate <= 0 {
         return;
+    }
+    // Always record the player's gate so the telemetry HUD can default its "followed" panel to it —
+    // this works even with the freecam OFF (telemetry is independent now). Only ENGAGE the camera
+    // (follow + pose capture) when the freecam is enabled.
+    let new_target = TARGET_GATE.load(Ordering::Relaxed) != gate;
+    TARGET_GATE.store(gate, Ordering::Relaxed);
+    if !ENABLED.load(Ordering::Relaxed) {
+        return; // telemetry-only: target known, camera not engaged
     }
     // Already following this same Uma → keep the user's framing (the race response
     // can arrive more than once; re-running reset the camera mid-race).
-    if FOLLOW.load(Ordering::Relaxed) && TARGET_GATE.load(Ordering::Relaxed) == gate {
+    if FOLLOW.load(Ordering::Relaxed) && !new_target {
         return;
     }
     EVER_CAP.store(false, Ordering::Relaxed);
-    TARGET_GATE.store(gate, Ordering::Relaxed);
     FOLLOW.store(true, Ordering::Relaxed);
     HAVE_TARGET.store(false, Ordering::Relaxed);
+    reset_pace(); // fresh race → clear the previous race's pace trace
     load_default_pose(); // provisional (track id may be 0 here); reloaded once it's known
     RACE_POSE_LOADED.store(false, Ordering::Relaxed); // re-apply the circuit's default once track id resolves
     CAMSET_HASH.store(0, Ordering::Relaxed); // DIAGNOSTIC: re-arm camera-set change dump
@@ -182,8 +296,11 @@ pub fn auto_follow_player(gate: i32) {
 pub fn mouse_look(dx: f32, dy: f32) {
     let s = 0.010; // mouse-drag orbit/look sensitivity
     if FOLLOW.load(Ordering::Relaxed) {
-        setf(&ORBIT_YAW, getf(&ORBIT_YAW) + dx * s);
-        let p = (getf(&ORBIT_PITCH) - dy * s).clamp(-ORBIT_PITCH_LIMIT, ORBIT_PITCH_LIMIT);
+        let fp = FIRST_PERSON.load(Ordering::Relaxed);
+        let ny = getf(&ORBIT_YAW) + dx * s;
+        setf(&ORBIT_YAW, if fp { ny.clamp(-FP_CONE_YAW, FP_CONE_YAW) } else { ny });
+        let plim = if fp { FP_CONE_PITCH } else { ORBIT_PITCH_LIMIT };
+        let p = (getf(&ORBIT_PITCH) - dy * s).clamp(-plim, plim);
         setf(&ORBIT_PITCH, p);
     } else {
         setf(&YAW, getf(&YAW) + dx * s);
@@ -292,6 +409,14 @@ fn freefly_forward() -> V3 {
 /// Camera position this frame (follow → orbiting the chosen Uma; else free-fly).
 fn current_pos() -> V3 {
     if FOLLOW.load(Ordering::Relaxed) && EVER_CAP.load(Ordering::Relaxed) {
+        if FIRST_PERSON.load(Ordering::Relaxed) {
+            // at the Uma's head: model origin + forward*FP_FWD, raised to eye height
+            return V3 {
+                x: getf(&TPX) + getf(&FX) * FP_FWD,
+                y: getf(&TPY) + getf(&EYE_H),
+                z: getf(&TPZ) + getf(&FZ) * FP_FWD,
+            };
+        }
         let eh = getf(&EYE_H);
         let fx = getf(&FX);
         let fz = getf(&FZ);
@@ -312,6 +437,19 @@ fn current_pos() -> V3 {
 
 fn current_lookat() -> V3 {
     if FOLLOW.load(Ordering::Relaxed) && EVER_CAP.load(Ordering::Relaxed) {
+        if FIRST_PERSON.load(Ordering::Relaxed) {
+            // look forward (Uma heading ± clamped cone), never panning into the void
+            let p = current_pos();
+            let heading = getf(&FX).atan2(getf(&FZ));
+            let yaw = heading + getf(&ORBIT_YAW).clamp(-FP_CONE_YAW, FP_CONE_YAW);
+            let pitch = getf(&ORBIT_PITCH).clamp(-FP_CONE_PITCH, FP_CONE_PITCH);
+            let cp = pitch.cos();
+            return V3 {
+                x: p.x + yaw.sin() * cp * LOOK_RADIUS,
+                y: p.y + pitch.sin() * LOOK_RADIUS,
+                z: p.z + yaw.cos() * cp * LOOK_RADIUS,
+            };
+        }
         let eh = getf(&EYE_H);
         let fl = 1.5; // aim just ahead of her head → she stays framed, track beyond
         V3 {
@@ -366,6 +504,69 @@ fn look_rotation(f: V3) -> [f32; 4] {
     }
 }
 
+// ── FP fog (mask the void) ────────────────────────────────────────────────────
+// Each helper loads a resolved RenderSettings static setter (Method) and calls it as
+// f(value, methodInfo) — same convention as graphics.rs.
+unsafe fn fog_b(slot: &AtomicUsize, v: bool) {
+    let m = slot.load(Ordering::Relaxed) as il2cpp::Method;
+    if m.is_null() { return; }
+    let p = il2cpp::method_pointer(m);
+    if p.is_null() { return; }
+    let f: extern "C" fn(bool, *const c_void) = std::mem::transmute(p);
+    f(v, m as *const c_void);
+}
+unsafe fn fog_i(slot: &AtomicUsize, v: i32) {
+    let m = slot.load(Ordering::Relaxed) as il2cpp::Method;
+    if m.is_null() { return; }
+    let p = il2cpp::method_pointer(m);
+    if p.is_null() { return; }
+    let f: extern "C" fn(i32, *const c_void) = std::mem::transmute(p);
+    f(v, m as *const c_void);
+}
+unsafe fn fog_f(slot: &AtomicUsize, v: f32) {
+    let m = slot.load(Ordering::Relaxed) as il2cpp::Method;
+    if m.is_null() { return; }
+    let p = il2cpp::method_pointer(m);
+    if p.is_null() { return; }
+    let f: extern "C" fn(f32, *const c_void) = std::mem::transmute(p);
+    f(v, m as *const c_void);
+}
+unsafe fn fog_color(slot: &AtomicUsize, rgba: &[f32; 4]) {
+    // Color (16 bytes) is passed by reference on win64 for a static method.
+    let m = slot.load(Ordering::Relaxed) as il2cpp::Method;
+    if m.is_null() { return; }
+    let p = il2cpp::method_pointer(m);
+    if p.is_null() { return; }
+    let f: extern "C" fn(*const [f32; 4], *const c_void) = std::mem::transmute(p);
+    f(rgba as *const [f32; 4], m as *const c_void);
+}
+/// Enable/disable linear distance fog (runs on the game thread, il2cpp-attached).
+unsafe fn apply_fp_fog(on: bool) {
+    if on {
+        fog_color(&SET_FOGCOLOR, &FOG_RGBA);
+        fog_i(&SET_FOGMODE, FOG_MODE_LINEAR);
+        fog_f(&SET_FOGSTART, FOG_START);
+        fog_f(&SET_FOGEND, FOG_END);
+        fog_b(&SET_FOG, true);
+    } else {
+        fog_b(&SET_FOG, false);
+    }
+}
+
+/// Set the near clip plane on our camera (instance method: f(cam, value, methodInfo)).
+unsafe fn set_near_clip(cam: *mut c_void, v: f32) {
+    let m = SET_NEARCLIP.load(Ordering::Relaxed) as il2cpp::Method;
+    if m.is_null() || cam.is_null() {
+        return;
+    }
+    let p = il2cpp::method_pointer(m);
+    if p.is_null() {
+        return;
+    }
+    let f: extern "C" fn(*mut c_void, f32, *const c_void) = std::mem::transmute(p);
+    f(cam, v, m as *const c_void);
+}
+
 // ── icall / method typedefs ───────────────────────────────────────────────────
 type VoidM = unsafe extern "C" fn(*mut c_void, *mut c_void);
 type FloatM = unsafe extern "C" fn(*mut c_void, *mut c_void) -> f32;
@@ -377,6 +578,11 @@ type LookAtIcall = unsafe extern "C" fn(*mut c_void, *mut V3, *mut V3);
 
 // "in a race" recency gate (RaceCameraManager only updates during races).
 static LAST_RACE_MS: AtomicU64 = AtomicU64::new(0);
+// Telemetry heartbeat: updated every frame a horse is actually being stepped (the running race).
+// More precise than the camera gate — it stops on the result screen / between races, so the HUD
+// hides and the data is wiped when a new race resumes after any gap.
+static LAST_TELEM_MS: AtomicU64 = AtomicU64::new(0);
+static RACE_EPOCH: AtomicU64 = AtomicU64::new(0);
 fn clock() -> &'static std::time::Instant {
     static C: OnceLock<std::time::Instant> = OnceLock::new();
     C.get_or_init(std::time::Instant::now)
@@ -386,6 +592,16 @@ fn mark_race() {
 }
 fn in_race() -> bool {
     (clock().elapsed().as_millis() as u64).saturating_sub(LAST_RACE_MS.load(Ordering::Relaxed)) < 300
+}
+/// True only while horses are actively being stepped (the running race) — goes stale on the result
+/// screen / between races, so the broadcast HUD hides when you leave the race.
+fn telem_fresh() -> bool {
+    (clock().elapsed().as_millis() as u64).saturating_sub(LAST_TELEM_MS.load(Ordering::Relaxed)) < 500
+}
+/// Bumped whenever a new race session starts (telemetry resumed after a gap). The HUD uses it to
+/// reset per-race visual state (e.g. the timing-tower slide animation) so nothing carries over.
+pub fn race_epoch() -> u64 {
+    RACE_EPOCH.load(Ordering::Relaxed)
 }
 
 // trampolines (original fn ptr) + kept detours
@@ -447,6 +663,28 @@ static D_UCDBR: OnceLock<RawDetour> = OnceLock::new();
 static D_UFOV: OnceLock<RawDetour> = OnceLock::new();
 static D_SETEN: OnceLock<RawDetour> = OnceLock::new();
 static D_SETACTIVE: OnceLock<RawDetour> = OnceLock::new();
+// RaceRendererVisibilitySwitcher neutralizer (first-person void fix).
+static D_VISSW: OnceLock<RawDetour> = OnceLock::new();
+static TR_VISSW: AtomicUsize = AtomicUsize::new(0);
+static RESET_RENDERER_FN: AtomicUsize = AtomicUsize::new(0); // ResetRenderer code ptr
+static RESET_RENDERER_MI: AtomicUsize = AtomicUsize::new(0); // ResetRenderer MethodInfo*
+// FP fog (masks the void on elevated courses). UnityEngine.RenderSettings static setters.
+static SET_FOG: AtomicUsize = AtomicUsize::new(0);      // set_fog(bool)
+static SET_FOGMODE: AtomicUsize = AtomicUsize::new(0);  // set_fogMode(FogMode int)
+static SET_FOGSTART: AtomicUsize = AtomicUsize::new(0); // set_fogStartDistance(float)
+static SET_FOGEND: AtomicUsize = AtomicUsize::new(0);   // set_fogEndDistance(float)
+static SET_FOGCOLOR: AtomicUsize = AtomicUsize::new(0); // set_fogColor(Color)
+static FOG_APPLIED: AtomicBool = AtomicBool::new(false);
+const FOG_MODE_LINEAR: i32 = 3;
+const FOG_START: f32 = 90.0;  // near scenery stays clear up to here
+const FOG_END: f32 = 450.0;   // void fades to fog color by here
+const FOG_RGBA: [f32; 4] = [0.62, 0.67, 0.74, 1.0]; // light sky-grey
+// Near-clip reduction: the game's RaceCourseCamera has a large near plane (fine for the far
+// chase). When you zoom in toward first-person, that plane clips the Umas + nearby ground →
+// they vanish and the clear color (navy "void") shows. A tiny near clip lets close geometry
+// render → no disappearing / no void when close.
+static SET_NEARCLIP: AtomicUsize = AtomicUsize::new(0); // Camera.set_nearClipPlane(float)
+const NEAR_CLIP: f32 = 0.03;
 
 // ── DIAGNOSTIC (start-dash camera director) — remove when done ─────────────────
 static CAM_GET_ALL: AtomicUsize = AtomicUsize::new(0);
@@ -459,6 +697,8 @@ static CAM_GET_DEPTH: AtomicUsize = AtomicUsize::new(0);
 static BEH_GET_ENABLED: AtomicUsize = AtomicUsize::new(0);
 static BEH_SET_ENABLED: AtomicUsize = AtomicUsize::new(0);
 static CAM_GET_FOV: AtomicUsize = AtomicUsize::new(0);
+/// Height above the model origin for the head marker (clears the Uma's head).
+const MARK_HEAD_H: f32 = 2.3;
 static RACE_CAM_OBJ: AtomicUsize = AtomicUsize::new(0); // cached RaceCourseCamera object
 static EFFECT_OBJ: AtomicUsize = AtomicUsize::new(0); // cached RaceEnvEffect camera (skill-aura suspect)
 // TEST: disable RaceEnvEffect while following to see if the skill speed-line "aura"
@@ -682,6 +922,21 @@ static SPEED_OFF: AtomicUsize = AtomicUsize::new(0);
 static DIST_OFF: AtomicUsize = AtomicUsize::new(0);
 static HPEMPTY_OFF: AtomicUsize = AtomicUsize::new(0); // <IsHpEmptyOnRace>: bool, exhausted
 static PHASE_OFF: AtomicUsize = AtomicUsize::new(0); // _phase: i32 race phase (>=2 = last spurt)
+// Live race-state flags (all pure bool/i32/float fields on HorseRaceInfo — cheap direct reads).
+static BADSTART_OFF: AtomicUsize = AtomicUsize::new(0); // <IsBadStart>: bool, late start
+static COMPFIGHT_OFF: AtomicUsize = AtomicUsize::new(0); // <IsCompeteFight>: bool, head-to-head fight
+static COMPTOP_OFF: AtomicUsize = AtomicUsize::new(0); // <IsCompeteTop>: bool, leading battle
+static BLOCKFRONT_OFF: AtomicUsize = AtomicUsize::new(0); // <BlockFrontContinueTime>: f32, >0 = boxed in
+static PREVORDER_OFF: AtomicUsize = AtomicUsize::new(0); // <PrevOrder>: i32, for the order-trend arrow
+static DEFEAT_OFF: AtomicUsize = AtomicUsize::new(0); // _defeat: i32 DefeatType (why she can't win)
+// Static-per-race identity (pointer-chase off `this`): HorseRaceInfo._horseData → HorseData,
+// HorseData.<Popularity> + HorseData._responseHorseData (RaceHorseData) → .running_style.
+static HDATA_OFF: AtomicUsize = AtomicUsize::new(0); // HorseRaceInfo._horseData (ptr)
+static POP_OFF: AtomicUsize = AtomicUsize::new(0); // HorseData.<Popularity>: i32 (人気 rank)
+static RESP_OFF: AtomicUsize = AtomicUsize::new(0); // HorseData._responseHorseData (ptr)
+static RSTYLE_OFF: AtomicUsize = AtomicUsize::new(0); // RaceHorseData.running_style: i32 (1..4)
+static TNAME_OFF: AtomicUsize = AtomicUsize::new(0); // RaceHorseData.trainer_name (managed String ptr)
+static VIEWER_OFF: AtomicUsize = AtomicUsize::new(0); // RaceHorseData.viewer_id: i64 (0 = NPC)
 // Skill activation FEED (followed Uma only). Read SkillManager._usedSkillIdList (per-uma
 // list of activated skill ids), detect new entries, resolve names via MasterDataUtil.
 // GetSkillName. All reads are pure; GetSkillName is called only when a NEW skill appears
@@ -691,6 +946,14 @@ static USEDLIST_OFF: AtomicUsize = AtomicUsize::new(0); // SkillManager._usedSki
 static GSN_FN: AtomicUsize = AtomicUsize::new(0); // MasterDataUtil.GetSkillName(id)
 static GSN_MI: AtomicUsize = AtomicUsize::new(0);
 static GSN_STATIC: AtomicBool = AtomicBool::new(true);
+// Skill effect values — in-memory master data (public-safe, no the game data):
+// WorkTrainingChallengeData.get_MasterManager() → MasterDataManager.<masterSkillData>@0xc8 →
+// MasterSkillData.Get(id) → SkillData (AbilityType11@0x6c, FloatAbilityValue11@0x78 ÷1e4, FloatAbilityTime1@0x60 ÷1e4).
+static MM_GET: AtomicUsize = AtomicUsize::new(0);
+static MM_GET_MI: AtomicUsize = AtomicUsize::new(0);
+static MSD_GET: AtomicUsize = AtomicUsize::new(0);
+static MSD_GET_MI: AtomicUsize = AtomicUsize::new(0);
+static MSD_INST: AtomicUsize = AtomicUsize::new(0); // cached MasterSkillData* (master data is stable)
 static FEED_SEEN: AtomicUsize = AtomicUsize::new(0); // ids already added for the followed Uma
 static SKILL_FEED: OnceLock<Mutex<Vec<(i32, String)>>> = OnceLock::new();
 fn skill_feed_buf() -> &'static Mutex<Vec<(i32, String)>> {
@@ -706,6 +969,190 @@ fn reset_skill_feed() {
     FEED_SEEN.store(0, Ordering::Relaxed);
     if let Ok(mut f) = skill_feed_buf().lock() {
         f.clear();
+    }
+}
+
+// ── live race-outlook reads for the followed Uma (followed Uma ONLY, once/frame) ──
+static SPURT_OUTLOOK: AtomicI32 = AtomicI32::new(0); // LastSpurtCalcResult bitflags (1/2 hold, 4/8 fade)
+static AI_OFF: AtomicUsize = AtomicUsize::new(0); // HorseRaceInfo._horseRaceAI (ptr)
+static AI_SPURT_GET: AtomicUsize = AtomicUsize::new(0); // HorseRaceAIReplay.get_LastSpurtCalcResult (REAL impl)
+// Live race-state getters on the AI (HorseRaceAIBase real cluster, same safe profile as spurt).
+static KAKARI_GET: AtomicUsize = AtomicUsize::new(0); // get_IsTemptation (bool)
+static TEMPTMODE_GET: AtomicUsize = AtomicUsize::new(0); // get_TemptationMode (enum)
+static KEEPMODE_GET: AtomicUsize = AtomicUsize::new(0); // get_PositionKeepMode (enum)
+static DOWNHILL_GET: AtomicUsize = AtomicUsize::new(0); // get_IsDownSlopeAccelMode (bool)
+// Active-skill countdown via a pure FIELD walk (no GetCurrentActiveSkill stub — that crashed):
+// SkillManager._skills (List<SkillBase>) → SkillBase.Details (List<SkillDetail>) → detail fields.
+static SKILLS_LIST_OFF: AtomicUsize = AtomicUsize::new(0); // SkillManager._skills
+static SB_MASTER_OFF: AtomicUsize = AtomicUsize::new(0); // SkillBase.<SkillMaster> → SkillData
+static SB_DETAILS_OFF: AtomicUsize = AtomicUsize::new(0); // SkillBase.<Details> (List<SkillDetail>)
+static SD_LEFT_OFF: AtomicUsize = AtomicUsize::new(0); // SkillDetail.<LeftTime>
+static SD_CAT_OFF: AtomicUsize = AtomicUsize::new(0); // SkillDetail.<Category>
+static SD_DEBUFF_OFF: AtomicUsize = AtomicUsize::new(0); // SkillDetail._isDebuff
+static SD_ACT_OFF: AtomicUsize = AtomicUsize::new(0); // SkillDetail.<IsActivated>
+
+/// One currently-active skill effect on the followed Uma (live countdown).
+#[derive(Clone, Copy)]
+pub struct ActiveSkill {
+    pub id: i32,
+    pub left: f32,      // seconds of effect remaining
+    pub category: i32,  // SkillCategory: 0 Speed, 1 Heal, 2 Accel, -1 none
+    pub debuff: bool,
+}
+static ACTIVE_SKILLS: OnceLock<Mutex<Vec<ActiveSkill>>> = OnceLock::new();
+fn active_skills_buf() -> &'static Mutex<Vec<ActiveSkill>> {
+    ACTIVE_SKILLS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Live AI-driven race state for the followed Uma (kakari / position-keep / down-slope).
+#[derive(Clone, Copy, Default)]
+pub struct FollowState {
+    pub kakari: bool,        // get_IsTemptation — over-eager, burning stamina
+    pub temptation_mode: i32, // TemptationMode (1 Sashi, 2 Senko, 3 Nige, 4 Boost)
+    pub keep_mode: i32,      // PositionKeepMode (1 SpeedUp, 2 Overtake, 3 PaseUp, 4 PaseDown)
+    pub downhill: bool,      // get_IsDownSlopeAccelMode — free downhill acceleration
+}
+static FOLLOW_STATE: OnceLock<Mutex<FollowState>> = OnceLock::new();
+fn follow_state_buf() -> &'static Mutex<FollowState> {
+    FOLLOW_STATE.get_or_init(|| Mutex::new(FollowState::default()))
+}
+/// Live race state of the followed Uma (kakari, position-keep mode, down-slope accel).
+pub fn follow_state() -> FollowState {
+    follow_state_buf().lock().map(|s| *s).unwrap_or_default()
+}
+
+/// Followed-Uma only: read the AI's live race-state getters (kakari / position-keep / down-slope).
+/// All on HorseRaceAIBase's real method cluster (unique RVAs — the safe kind, like spurt).
+unsafe fn update_follow_state(hri: *mut c_void) {
+    let ai_off = AI_OFF.load(Ordering::Relaxed);
+    if ai_off == 0 {
+        return;
+    }
+    let ai = ((hri as usize + ai_off) as *const *mut c_void).read_unaligned();
+    if ai.is_null() {
+        return;
+    }
+    let call_b = |p: usize| -> bool {
+        if p == 0 {
+            return false;
+        }
+        let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool = std::mem::transmute(p);
+        f(ai, std::ptr::null_mut())
+    };
+    let call_i = |p: usize| -> i32 {
+        if p == 0 {
+            return 0;
+        }
+        let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 = std::mem::transmute(p);
+        f(ai, std::ptr::null_mut())
+    };
+    let st = FollowState {
+        kakari: call_b(KAKARI_GET.load(Ordering::Relaxed)),
+        temptation_mode: call_i(TEMPTMODE_GET.load(Ordering::Relaxed)),
+        keep_mode: call_i(KEEPMODE_GET.load(Ordering::Relaxed)),
+        downhill: call_b(DOWNHILL_GET.load(Ordering::Relaxed)),
+    };
+    if let Ok(mut b) = follow_state_buf().lock() {
+        *b = st;
+    }
+}
+/// Skills whose effect is active RIGHT NOW on the followed Uma (with seconds remaining).
+pub fn active_skills() -> Vec<ActiveSkill> {
+    active_skills_buf().lock().map(|b| b.clone()).unwrap_or_default()
+}
+/// Last-spurt sustainability for the followed Uma: `&3 != 0` = will hold the spurt,
+/// `&12 != 0` = will run out of stamina before the line. 0 = not yet computed.
+pub fn spurt_outlook() -> i32 {
+    SPURT_OUTLOOK.load(Ordering::Relaxed)
+}
+fn reset_outlook() {
+    SPURT_OUTLOOK.store(0, Ordering::Relaxed);
+    if let Ok(mut b) = active_skills_buf().lock() {
+        b.clear();
+    }
+    if let Ok(mut s) = follow_state_buf().lock() {
+        *s = FollowState::default();
+    }
+}
+
+// IL2CPP List<T>: _items (T[]) @0x10, _size @0x18; ref-type array data starts at +0x20 (8B refs).
+#[inline]
+unsafe fn list_ptr_at(list: *mut c_void, i: i32) -> *mut c_void {
+    let items = ((list as usize + 0x10) as *const *mut c_void).read_unaligned();
+    if items.is_null() {
+        return std::ptr::null_mut();
+    }
+    ((items as usize + 0x20 + i as usize * 8) as *const *mut c_void).read_unaligned()
+}
+#[inline]
+unsafe fn list_size(list: *mut c_void) -> i32 {
+    ((list as usize + 0x18) as *const i32).read_unaligned()
+}
+
+/// Followed-Uma only: the currently-active skill effects + remaining time, by a PURE FIELD WALK
+/// (no `GetCurrentActiveSkill` — that's a crashing stub on this build). Walks SkillManager._skills
+/// → each SkillBase's Details → any SkillDetail with IsActivated & LeftTime>0.
+unsafe fn update_active_skills(hri: *mut c_void) {
+    let mgr_off = SKILLMGR_OFF.load(Ordering::Relaxed);
+    let list_off = SKILLS_LIST_OFF.load(Ordering::Relaxed);
+    let det_off = SB_DETAILS_OFF.load(Ordering::Relaxed);
+    let act_off = SD_ACT_OFF.load(Ordering::Relaxed);
+    let left_off = SD_LEFT_OFF.load(Ordering::Relaxed);
+    if mgr_off == 0 || list_off == 0 || det_off == 0 || act_off == 0 || left_off == 0 {
+        return;
+    }
+    let mut out: Vec<ActiveSkill> = Vec::new();
+    let mgr = ((hri as usize + mgr_off) as *const *mut c_void).read_unaligned();
+    if !mgr.is_null() {
+        let skills = ((mgr as usize + list_off) as *const *mut c_void).read_unaligned();
+        if !skills.is_null() {
+            let master_off = SB_MASTER_OFF.load(Ordering::Relaxed);
+            let cat_off = SD_CAT_OFF.load(Ordering::Relaxed);
+            let deb_off = SD_DEBUFF_OFF.load(Ordering::Relaxed);
+            let n = list_size(skills).clamp(0, 64);
+            for i in 0..n {
+                let sb = list_ptr_at(skills, i);
+                if sb.is_null() {
+                    continue;
+                }
+                let details = ((sb as usize + det_off) as *const *mut c_void).read_unaligned();
+                if details.is_null() {
+                    continue;
+                }
+                // most-time-remaining active detail of this skill (≤2 details per skill)
+                let (mut best_left, mut best_cat, mut best_deb, mut any) = (0.0f32, -1i32, false, false);
+                let dn = list_size(details).clamp(0, 4);
+                for j in 0..dn {
+                    let d = list_ptr_at(details, j);
+                    if d.is_null() {
+                        continue;
+                    }
+                    let activated = ((d as usize + act_off) as *const u8).read_unaligned() != 0;
+                    let left = ((d as usize + left_off) as *const f32).read_unaligned();
+                    if activated && left > 0.05 && left < 60.0 {
+                        any = true;
+                        if left > best_left {
+                            best_left = left;
+                            best_cat = if cat_off != 0 { ((d as usize + cat_off) as *const i32).read_unaligned() } else { -1 };
+                            best_deb = deb_off != 0 && ((d as usize + deb_off) as *const u8).read_unaligned() != 0;
+                        }
+                    }
+                }
+                if any {
+                    // skill id ← SkillBase.SkillMaster → SkillData.Id @0x10
+                    let id = if master_off != 0 {
+                        let m = ((sb as usize + master_off) as *const *mut c_void).read_unaligned();
+                        if m.is_null() { 0 } else { ((m as usize + 0x10) as *const i32).read_unaligned() }
+                    } else {
+                        0
+                    };
+                    out.push(ActiveSkill { id, left: best_left, category: best_cat, debuff: best_deb });
+                }
+            }
+        }
+    }
+    if let Ok(mut b) = active_skills_buf().lock() {
+        *b = out;
     }
 }
 
@@ -790,7 +1237,73 @@ unsafe fn skill_name(id: i32) -> String {
     }
     let f: unsafe extern "C" fn(i32, *const c_void) -> *mut c_void = std::mem::transmute(p);
     let obj = f(id, GSN_MI.load(Ordering::Relaxed) as *const c_void);
-    read_managed_str(obj).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Skill {id}"))
+    let raw = read_managed_str(obj).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Skill {id}"));
+    // Some skill names carry a trailing tier/symbol glyph the bundled Latin font can't render, so
+    // imgui draws it as its fallback char ("?"). Strip trailing spaces + any char beyond Latin
+    // Extended-A so the name reads clean (e.g. "Competitive Spirit ?" → "Competitive Spirit").
+    let cleaned = raw.trim_end_matches(|c: char| c == ' ' || (c as u32) > 0x024F);
+    if cleaned.is_empty() { raw } else { cleaned.to_string() }
+}
+
+// gate-independent cache: skill_id → short effect string ("+0.35 m/s 3s"). Master data is constant
+// for the session, so once resolved it's cached forever (no per-race reset).
+static SKILL_EFFECT: OnceLock<Mutex<HashMap<i32, String>>> = OnceLock::new();
+fn skill_effect_buf() -> &'static Mutex<HashMap<i32, String>> {
+    SKILL_EFFECT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+/// Cached effect string for a skill id (empty until resolved / if unknown). Read by the overlay.
+pub fn skill_effect_of(id: i32) -> String {
+    skill_effect_buf().lock().ok().and_then(|m| m.get(&id).cloned()).unwrap_or_default()
+}
+/// Read a skill's PRIMARY ability (type/value/time) from the game's in-memory master data and format
+/// "+value unit · time". ×10000 fixed-point. Game-thread only (managed calls); call once per id.
+unsafe fn compute_skill_effect(id: i32) -> String {
+    let getmm = MM_GET.load(Ordering::Relaxed);
+    let get = MSD_GET.load(Ordering::Relaxed);
+    if getmm == 0 || get == 0 {
+        return String::new();
+    }
+    let mut msd = MSD_INST.load(Ordering::Relaxed);
+    if msd == 0 {
+        let f: unsafe extern "C" fn(*const c_void) -> *mut c_void = std::mem::transmute(getmm);
+        let mgr = f(MM_GET_MI.load(Ordering::Relaxed) as *const c_void);
+        if mgr.is_null() {
+            return String::new();
+        }
+        msd = ((mgr as usize + 0xc8) as *const usize).read_unaligned(); // <masterSkillData>k__BackingField
+        if msd == 0 {
+            return String::new();
+        }
+        MSD_INST.store(msd, Ordering::Relaxed);
+    }
+    let gf: unsafe extern "C" fn(*mut c_void, i32, *const c_void) -> *mut c_void = std::mem::transmute(get);
+    let sd = gf(msd as *mut c_void, id, MSD_GET_MI.load(Ordering::Relaxed) as *const c_void);
+    if sd.is_null() {
+        return String::new();
+    }
+    let base = sd as usize;
+    let atype = ((base + 0x6c) as *const i32).read_unaligned(); // AbilityType11
+    let aval = ((base + 0x78) as *const i32).read_unaligned(); // FloatAbilityValue11 (×1e4)
+    let atime = ((base + 0x60) as *const i32).read_unaligned(); // FloatAbilityTime1 (×1e4)
+    if atype == 0 || aval == 0 {
+        return String::new();
+    }
+    let v = aval as f32 / 10000.0; // ×1e4 fixed-point
+    let t = atime as f32 / 10000.0;
+    let dur = if t > 0.4 { format!(" {t:.1}s") } else { String::new() };
+    // Ability types confirmed from real skill data: 1-5 = stat boosts (passive), 21/22/27 = target
+    // speed (m/s), 31 = acceleration (m/s²), 9 = HP recovery, 10 = start (Focus). Verified in-game.
+    match atype {
+        1 => format!("+{v:.0} Speed"),
+        2 => format!("+{v:.0} Stamina"),
+        3 => format!("+{v:.0} Power"),
+        4 => format!("+{v:.0} Guts"),
+        5 => format!("+{v:.0} Wisdom"),
+        21 | 22 | 27 => format!("+{v:.2} m/s{dur}"),
+        31 => format!("+{v:.2} m/s2{dur}"),
+        9 => format!("+{:.0}% HP", v * 100.0), // recovery as % of max HP
+        _ => format!("+{v:.2}{dur}"),           // 10 (start) + any unmapped type: raw value
+    }
 }
 
 /// For the followed Uma, append any newly-activated skills to the feed (resolving names).
@@ -824,6 +1337,14 @@ unsafe fn update_skill_feed(hri: *mut c_void) {
         for i in seen..size as usize {
             let id = base.add(i).read_unaligned();
             feed.push((id, skill_name(id)));
+            // Resolve + cache this skill's effect string once (game thread = safe for the managed call).
+            let need = skill_effect_buf().lock().map(|m| !m.contains_key(&id)).unwrap_or(false);
+            if need {
+                let eff = compute_skill_effect(id);
+                if let Ok(mut m) = skill_effect_buf().lock() {
+                    m.insert(id, eff);
+                }
+            }
         }
     }
     FEED_SEEN.store(size as usize, Ordering::Relaxed);
@@ -844,6 +1365,16 @@ pub struct HorseTelem {
     pub spurt: bool,   // in last spurt (final sprint)
     pub exhausted: bool, // HP empty on race (out of stamina)
     pub skills: i32,   // skills activated so far
+    pub late_start: bool, // IsBadStart — botched the gate (late start)
+    pub fight: bool,    // IsCompeteFight — locked in a head-to-head duel
+    pub leading: bool,  // IsCompeteTop — contesting the lead
+    pub blocked: bool,  // BlockFrontContinueTime > 0 — boxed in behind another horse
+    pub prev_order: i32, // last frame's order — for the position-trend arrow
+    pub popularity: i32, // betting favourite rank (人気); 1 = top pick, 0 = unknown
+    pub running_style: i32, // 1 Nige, 2 Senko, 3 Sashi, 4 Oikomi (0 = unknown)
+    pub defeat: i32,     // DefeatType — why she can't win (0 none, 1 win, else a reason)
+    pub wx: f32,         // world position X (for the track-map minimap)
+    pub wz: f32,         // world position Z
 }
 
 static TELEM: OnceLock<Mutex<HashMap<i32, HorseTelem>>> = OnceLock::new();
@@ -855,6 +1386,32 @@ fn telem_buf() -> &'static Mutex<HashMap<i32, HorseTelem>> {
 static NAMEMAP: OnceLock<Mutex<HashMap<i32, String>>> = OnceLock::new();
 fn name_map() -> &'static Mutex<HashMap<i32, String>> {
     NAMEMAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// gate → (trainer_name, viewer_id) from RaceHorseData. Static per race; read once per gate. Empty
+// trainer / viewer 0 = an NPC (career races). Real lobbies (Team Trials, Champions, Room Match) carry
+// the human trainer name, and umas of the same viewer_id are the same person's team (1-3 umas).
+static TRAINERMAP: OnceLock<Mutex<HashMap<i32, (String, i64)>>> = OnceLock::new();
+fn trainer_map() -> &'static Mutex<HashMap<i32, (String, i64)>> {
+    TRAINERMAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// gate → finish rank (1 = crossed the line first), captured the frame a Uma's distance first reaches
+// the course distance. The tower keeps finished Umas in this exact crossing order during the run-out
+// (where raw distances diverge by deceleration) so the on-stream order matches the real result.
+static FINISHRANK: OnceLock<Mutex<HashMap<i32, i32>>> = OnceLock::new();
+static FINISH_NEXT: AtomicI32 = AtomicI32::new(0);
+fn finish_rank() -> &'static Mutex<HashMap<i32, i32>> {
+    FINISHRANK.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// gate → previous tower position (our DISTANCE-based order, not the game's unreliable CurOrder), so
+// the position-change flash (green = gained, red = lost) reflects the real order shown. Refreshed on
+// a short throttle so the trend stays non-zero long enough for the flash to catch it.
+static PREVPOS: OnceLock<Mutex<HashMap<i32, i32>>> = OnceLock::new();
+static LAST_POS_MS: AtomicU64 = AtomicU64::new(0);
+fn prev_pos() -> &'static Mutex<HashMap<i32, i32>> {
+    PREVPOS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 fn gate_name(gate: i32) -> String {
     name_map()
@@ -913,6 +1470,198 @@ pub fn telemetry() -> Option<TelemView> {
     let rival_name = rival.map(|r| gate_name(r.gate)).unwrap_or_default();
     let chara_id = id_map().lock().ok().and_then(|m| m.get(&followed.gate).copied()).unwrap_or(0);
     Some(TelemView { followed, followed_name, rival, rival_name, rival_ahead: ahead, gap, field_size, chara_id })
+}
+
+/// One row of the broadcast timing tower — the whole field, leader-first.
+#[derive(Clone)]
+pub struct FieldRow {
+    pub pos: i32,        // display position (1 = leader)
+    pub gate: i32,
+    pub name: String,
+    pub style: i32,      // 1 Nige .. 4 Oikomi (0 = unknown)
+    pub sta: f32,        // 0..1 stamina
+    pub interval: f32,   // metres behind the horse directly ahead (0 for the leader)
+    pub gap_leader: f32, // metres behind the leader
+    pub trend: i32,      // places gained since last frame (prev_order - order)
+    pub popularity: i32, // 人気 rank
+    pub spurt: bool,
+    pub exhausted: bool,
+    pub fight: bool,
+    pub blocked: bool,
+    pub followed: bool,  // this is the camera's current target
+    pub win: f32,        // live win probability 0..1 (physics ETA model)
+    pub dist: f32,       // metres covered (for the phase/progress header)
+    pub speed: f32,      // current m/s (for time-gap intervals)
+    pub trainer: String, // human trainer name (lobby races); empty for NPCs
+    pub viewer_id: i64,  // trainer id — same id = same person's team (1-3 umas); 0 = NPC
+    pub wx: f32,         // world position X (track-map minimap)
+    pub wz: f32,         // world position Z
+}
+
+/// The full field for the broadcast timing tower, ordered leader-first. Empty until a race is
+/// live. Built from the same per-frame telemetry buffer the HUD uses — all pure reads, so this
+/// is read-only and has no effect on the race.
+pub fn field_rows() -> Vec<FieldRow> {
+    let mut hs: Vec<HorseTelem> = match telem_buf().lock() {
+        Ok(b) if !b.is_empty() => b.values().copied().collect(),
+        _ => return Vec::new(),
+    };
+    let target = TARGET_GATE.load(Ordering::Relaxed);
+    // Leader-first: by race order when valid, falling back to distance covered.
+    // Order: Umas that have CROSSED the finish line first, in their exact CROSSING order (frozen rank),
+    // then the still-racing Umas by DISTANCE covered (most = ahead). The game's CurOrder field is
+    // unreliable (it resets at the line — used to send the winner to the bottom), and raw run-out
+    // distance diverges after the line — so we freeze the crossing order for an on-stream-correct result.
+    let franks = finish_rank().lock().map(|m| m.clone()).unwrap_or_default();
+    hs.sort_by(|a, b| {
+        match (franks.get(&a.gate), franks.get(&b.gate)) {
+            (Some(x), Some(y)) => x.cmp(y),                  // both finished → crossing order
+            (Some(_), None) => std::cmp::Ordering::Less,     // a finished, b racing → a ahead
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => b.distance.partial_cmp(&a.distance).unwrap_or(std::cmp::Ordering::Equal),
+        }
+    });
+    // pos is assigned later from this order; the trend (for the green/red flash) is computed below
+    // from OUR distance order, NOT the game's CurOrder.
+    let leader_dist = hs.first().map(|h| h.distance).unwrap_or(0.0);
+    let n = hs.len().max(1) as f32;
+    // ── live win-probability model: PHYSICS-grounded ETA-to-finish (HeavenSim-derived) ──
+    // For each Uma we project its real time-to-finish using the game's EXACT HP-drain formula
+    // (HpDecBase·gap²/SpeedGapParam1Pow, gap = speed − raceBaseSpeed + 12): if its current HP can
+    // sustain its pace to the line it finishes at pace (small spurt bonus in the last 3F); if not,
+    // it runs at pace until HP=0 then crawls home at the min-speed floor (raceBaseSpeed·MinSpeedRate).
+    // Lowest ETA = most likely winner → softmax over −ETA. Early on, ETAs are near-tied so a betting
+    // favourite (人気) prior leads; it fades to zero as the race resolves. Uses only live telemetry.
+    let course = crate::race::course_distance() as f32;
+    let progress = if course > 0.0 { (leader_dist / course).clamp(0.0, 1.0) } else { 0.0 };
+    // raceBaseSpeed (REAL): 20 − (courseDistance − 2000)/1000. Min/gassed floor ≈ rbs·0.85 + guts bump.
+    let rbs = if course > 0.0 { 20.0 - (course - 2000.0) / 1000.0 } else { 20.0 };
+    let gassed = (rbs * 0.85 + 0.3).max(1.0);
+    // expected time (seconds) for horse h to cover its remaining distance, from now
+    let eta = |h: &HorseTelem| -> f32 {
+        let remaining = if course > 0.0 { (course - h.distance).max(0.0) } else { 1.0 };
+        if remaining <= 0.0 {
+            return 0.0;
+        }
+        let spd = h.speed.max(rbs * 0.5).max(1.0);
+        if h.exhausted || h.hp <= 1.0 {
+            return remaining / gassed; // already gassed → crawl to the line
+        }
+        // real HP-drain rate at this pace (end-phase guts term approximated, no guts stat live)
+        let gap = (spd - rbs + 12.0).max(0.0);
+        let gmult = if progress >= 0.66 { 1.7 } else { 1.0 }; // tuned vs 700 real races
+        let drain = (gap * gap / 144.0) * 20.0 * gmult;
+        let t_at_pace = remaining / spd;
+        let hp_needed = drain * t_at_pace;
+        if h.hp >= hp_needed {
+            let v = spd; // can sustain to the line (tuning showed no spurt-speed bonus helps)
+            remaining / v
+        } else {
+            // gases out partway: hold pace until HP=0, then crawl the rest at the floor
+            let t_survive = h.hp / drain.max(1e-3);
+            let d_survive = (spd * t_survive).min(remaining);
+            t_survive + (remaining - d_survive).max(0.0) / gassed
+        }
+    };
+    let etas: Vec<f32> = hs.iter().map(eta).collect();
+    let min_eta = etas.iter().cloned().fold(f32::MAX, f32::min);
+    // softmax over −T·(ETA − best) + a fading 人気 prior. T≈1.2/s → ~1s ETA edge ≈ 3× odds.
+    let logits: Vec<f32> = hs
+        .iter()
+        .zip(&etas)
+        .map(|(h, e)| {
+            let pop = if h.popularity > 0 { h.popularity as f32 } else { n * 0.5 };
+            // Temperature sharpens as the race resolves (uncertain early → confident late), tuned
+            // against 700 real races. Plus the fading 人気 favourite prior.
+            let t = 0.8 + 5.0 * progress;
+            -t * (e - min_eta) + 0.45 * (1.0 - progress) * -(pop - 1.0)
+        })
+        .collect();
+    let maxl = logits.iter().cloned().fold(f32::MIN, f32::max);
+    let exps: Vec<f32> = logits.iter().map(|l| (l - maxl).exp()).collect();
+    let sum: f32 = exps.iter().sum::<f32>().max(1e-6);
+
+    let mut prev_dist = leader_dist;
+    let mut out = Vec::with_capacity(hs.len());
+    for (i, h) in hs.iter().enumerate() {
+        let interval = (prev_dist - h.distance).max(0.0);
+        prev_dist = h.distance;
+        out.push(FieldRow {
+            pos: i as i32 + 1,
+            gate: h.gate,
+            name: gate_name(h.gate),
+            style: h.running_style,
+            sta: if h.max_hp > 0.0 { (h.hp / h.max_hp).clamp(0.0, 1.0) } else { 0.0 },
+            interval,
+            gap_leader: (leader_dist - h.distance).max(0.0),
+            trend: if h.prev_order > 0 { h.prev_order - h.order } else { 0 },
+            popularity: h.popularity,
+            spurt: h.spurt,
+            exhausted: h.exhausted,
+            fight: h.fight,
+            blocked: h.blocked,
+            followed: h.gate == target,
+            win: exps[i] / sum,
+            dist: h.distance,
+            speed: h.speed,
+            trainer: trainer_map().lock().ok().and_then(|m| m.get(&h.gate).map(|(n, _)| n.clone())).unwrap_or_default(),
+            viewer_id: trainer_map().lock().ok().and_then(|m| m.get(&h.gate).map(|(_, v)| *v)).unwrap_or(0),
+            wx: h.wx,
+            wz: h.wz,
+        });
+    }
+    // Override the trend with OUR distance-based position change (the game's CurOrder is unreliable).
+    // +ve = gained a place (moved up) → green flash; -ve = lost → red. The prev-position snapshot is
+    // throttled so the trend stays non-zero long enough for the flash, and so the several field_rows
+    // calls per frame all read the same value.
+    {
+        let now = clock().elapsed().as_millis() as u64;
+        let refresh = now.saturating_sub(LAST_POS_MS.load(Ordering::Relaxed)) > 150;
+        if let Ok(mut prev) = prev_pos().lock() {
+            for r in out.iter_mut() {
+                r.trend = prev.get(&r.gate).map(|p| p - r.pos).unwrap_or(0);
+            }
+            if refresh {
+                for r in &out {
+                    prev.insert(r.gate, r.pos);
+                }
+                LAST_POS_MS.store(now, Ordering::Relaxed);
+            }
+        }
+    }
+    out
+}
+
+// ── live speed history (followed Uma) — the WHOLE race, sampled by PROGRESS, drawn left→right ──
+/// Number of buckets across 0→100 % of the course. The pace graph fills these as the race runs.
+pub const PACE_BUCKETS: usize = 140;
+static SPEED_TRACE: OnceLock<Mutex<Vec<f32>>> = OnceLock::new();
+fn speed_trace_buf() -> &'static Mutex<Vec<f32>> {
+    SPEED_TRACE.get_or_init(|| Mutex::new(Vec::new()))
+}
+/// The followed Uma's whole-race speed history: one sample per progress bucket, index 0 = race start,
+/// the last filled index = current progress. Drawn as a graph that builds left→right over the race.
+pub fn speed_trace() -> Vec<f32> {
+    speed_trace_buf().lock().map(|t| t.clone()).unwrap_or_default()
+}
+/// Record the followed Uma's speed at its current race progress (0..1). Fills any skipped buckets up
+/// to the current one, so the history only ever grows rightward.
+fn push_pace(progress: f32, v: f32) {
+    let b = ((progress.clamp(0.0, 1.0) * PACE_BUCKETS as f32) as usize).min(PACE_BUCKETS - 1);
+    if let Ok(mut t) = speed_trace_buf().lock() {
+        while t.len() <= b {
+            let fill = *t.last().unwrap_or(&v);
+            t.push(fill);
+        }
+        t[b] = v;
+    }
+}
+/// Clear the pace history + live outlook (on a new race / when switching followed Uma).
+fn reset_pace() {
+    if let Ok(mut t) = speed_trace_buf().lock() {
+        t.clear();
+    }
+    reset_outlook();
 }
 // gate → charaId (HorseData.charaId), captured in the ctor hook — for the portrait icon.
 static IDMAP: OnceLock<Mutex<HashMap<i32, i32>>> = OnceLock::new();
@@ -1072,12 +1821,31 @@ fn following() -> bool {
 /// True only while a race is actually live and we're following a Uma (recency-gated). The
 /// telemetry HUD uses this so it shows ONLY during a race, never out in the menus.
 pub fn race_active() -> bool {
-    following()
+    // Driven by the telemetry toggle (independent of the freecam). Stays up while the race is running
+    // (fresh telemetry) OR while we're still in the race SCENE (the race-camera manager keeps ticking
+    // through the static result screen — "you finished Nth") — so the data persists on that screen and
+    // only hides once you advance past it (the scene transitions and `in_race` goes stale).
+    crate::settings::telemetry() && (telem_fresh() || in_race())
 }
 
 // ── bracket hooks ─────────────────────────────────────────────────────────────
 unsafe extern "C" fn on_alter_late_update(this: *mut c_void, mi: *mut c_void) {
     mark_race();
+    // FP fog: apply when first-person turns on, remove when it turns off.
+    {
+        let fp = FIRST_PERSON.load(Ordering::Relaxed);
+        if fp != FOG_APPLIED.load(Ordering::Relaxed) {
+            apply_fp_fog(fp);
+            FOG_APPLIED.store(fp, Ordering::Relaxed);
+        }
+    }
+    // Tiny near clip — FP-only now (FP is shelved; keep 3rd-person depth precision untouched).
+    if FIRST_PERSON.load(Ordering::Relaxed) {
+        let cam = RACE_CAM_OBJ.load(Ordering::Relaxed);
+        if cam != 0 {
+            set_near_clip(cam as *mut c_void, NEAR_CLIP);
+        }
+    }
     UPDATE_RACE_CAM.store(ENABLED.load(Ordering::Relaxed), Ordering::Relaxed);
     let t = TR_LATE.load(Ordering::Relaxed);
     if t != 0 {
@@ -1317,6 +2085,26 @@ unsafe extern "C" fn on_play_event_camera(
     false
 }
 
+// RaceRendererVisibilitySwitcher.UpdateRenderer(pos, targetPos) — the per-object occlusion
+// culler that disables scenery renderers lying on the camera→target ray. In first-person that
+// ray sweeps the course and blanks geometry (the intermittent "void"). While FP is on, force
+// the renderer ON (ResetRenderer) instead of running the cull. 3rd-person keeps stock behavior.
+unsafe extern "C" fn on_vis_update(this: *mut c_void, pos: *mut c_void, tgt: *mut c_void, mi: *mut c_void) {
+    if FIRST_PERSON.load(Ordering::Relaxed) {
+        let rr = RESET_RENDERER_FN.load(Ordering::Relaxed);
+        if rr != 0 && !this.is_null() {
+            let f: unsafe extern "C" fn(*mut c_void, *mut c_void) = std::mem::transmute(rr);
+            f(this, RESET_RENDERER_MI.load(Ordering::Relaxed) as *mut c_void); // -> set_enabled(true)
+        }
+        return;
+    }
+    let t = TR_VISSW.load(Ordering::Relaxed);
+    if t != 0 {
+        let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) = std::mem::transmute(t);
+        f(this, pos, tgt, mi);
+    }
+}
+
 // RaceModelController.UpdateCameraDistanceBlendRate(p1,p2,p3) — the distance blend
 // that drags the view to cinematic establishing shots. Skip while freecam is on.
 unsafe extern "C" fn on_update_camera_distance_blend_rate(
@@ -1348,7 +2136,10 @@ unsafe extern "C" fn on_run_motion(this: *mut c_void, mi: *mut c_void) -> f32 {
     } else {
         0.0
     };
-    if !(ENABLED.load(Ordering::Relaxed) && FOLLOW.load(Ordering::Relaxed)) {
+    // Collect telemetry when the freecam is following OR the telemetry HUD is on (independent now).
+    // The camera-capture part below additionally requires the freecam to be engaged (`fc`).
+    let fc = ENABLED.load(Ordering::Relaxed) && FOLLOW.load(Ordering::Relaxed);
+    if !(fc || crate::settings::telemetry()) {
         return ret;
     }
     let gate = gate_map()
@@ -1372,6 +2163,64 @@ unsafe extern "C" fn on_run_motion(this: *mut c_void, mi: *mut c_void) -> f32 {
         let spurt = ph_off != 0 && ((this as usize + ph_off) as *const i32).read_unaligned() >= 2;
         let hpe_off = HPEMPTY_OFF.load(Ordering::Relaxed);
         let exhausted = hpe_off != 0 && ((this as usize + hpe_off) as *const u8).read_unaligned() != 0;
+        // Live race-state flags — pure bool/i32/float reads (same safety profile as the above).
+        let rdb = |o: &AtomicUsize| -> bool {
+            let v = o.load(Ordering::Relaxed);
+            v != 0 && ((this as usize + v) as *const u8).read_unaligned() != 0
+        };
+        let blk_off = BLOCKFRONT_OFF.load(Ordering::Relaxed);
+        let blocked = blk_off != 0 && ((this as usize + blk_off) as *const f32).read_unaligned() > 0.0;
+        let pvo_off = PREVORDER_OFF.load(Ordering::Relaxed);
+        let prev_order = if pvo_off == 0 { 0 } else { ((this as usize + pvo_off) as *const i32).read_unaligned() };
+        let def_off = DEFEAT_OFF.load(Ordering::Relaxed);
+        let defeat = if def_off == 0 { 0 } else { ((this as usize + def_off) as *const i32).read_unaligned() };
+        // World position (X,Z) for the track-map minimap — pure Vector3 field read.
+        let (mut wx, mut wz) = (0.0f32, 0.0f32);
+        let po = POS_OFF.load(Ordering::Relaxed);
+        if po != 0 {
+            let p = (this as usize + po) as *const f32;
+            wx = p.read_unaligned();
+            wz = p.add(2).read_unaligned();
+        }
+        // Identity (static per race) — pure pointer-chase, no managed calls: popularity off the
+        // HorseData, running style off its server-response data. 0 if any link is absent.
+        let (mut popularity, mut running_style) = (0i32, 0i32);
+        let hd_off = HDATA_OFF.load(Ordering::Relaxed);
+        if hd_off != 0 {
+            let hd = ((this as usize + hd_off) as *const *mut c_void).read_unaligned();
+            if !hd.is_null() {
+                let po = POP_OFF.load(Ordering::Relaxed);
+                if po != 0 {
+                    popularity = ((hd as usize + po) as *const i32).read_unaligned();
+                }
+                let ro = RESP_OFF.load(Ordering::Relaxed);
+                if ro != 0 {
+                    let resp = ((hd as usize + ro) as *const *mut c_void).read_unaligned();
+                    if !resp.is_null() {
+                        let so = RSTYLE_OFF.load(Ordering::Relaxed);
+                        if so != 0 {
+                            running_style = ((resp as usize + so) as *const i32).read_unaligned();
+                        }
+                        // Trainer identity is static per race → read the managed string just once per gate.
+                        let unknown = trainer_map().lock().map(|m| !m.contains_key(&gate)).unwrap_or(false);
+                        if unknown {
+                            let to = TNAME_OFF.load(Ordering::Relaxed);
+                            let vo = VIEWER_OFF.load(Ordering::Relaxed);
+                            let tname = if to != 0 {
+                                let sp = ((resp as usize + to) as *const *mut c_void).read_unaligned();
+                                read_managed_str(sp).unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            let vid = if vo != 0 { ((resp as usize + vo) as *const i64).read_unaligned() } else { 0 };
+                            if let Ok(mut m) = trainer_map().lock() {
+                                m.insert(gate, (tname, vid));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let t = HorseTelem {
             gate,
             order,
@@ -1382,13 +2231,64 @@ unsafe extern "C" fn on_run_motion(this: *mut c_void, mi: *mut c_void) -> f32 {
             spurt,
             exhausted,
             skills: 0, // per-uma skills come from the activation FEED (skill_feed())
+            late_start: rdb(&BADSTART_OFF),
+            fight: rdb(&COMPFIGHT_OFF),
+            leading: rdb(&COMPTOP_OFF),
+            blocked,
+            prev_order,
+            popularity,
+            running_style,
+            defeat,
+            wx,
+            wz,
         };
+        // Heartbeat + new-race detection: if telemetry resumed after a real gap (we left the race
+        // and a new one started — even with the SAME player gate), wipe last race's data so nothing
+        // freezes over. Then mark the heartbeat fresh.
+        let now_ms = clock().elapsed().as_millis() as u64;
+        if now_ms.saturating_sub(LAST_TELEM_MS.load(Ordering::Relaxed)) > 800 {
+            if let Ok(mut b) = telem_buf().lock() {
+                b.clear();
+            }
+            if let Ok(mut m) = trainer_map().lock() {
+                m.clear();
+            }
+            if let Ok(mut m) = finish_rank().lock() {
+                m.clear();
+            }
+            FINISH_NEXT.store(0, Ordering::Relaxed);
+            if let Ok(mut m) = prev_pos().lock() {
+                m.clear();
+            }
+            reset_skill_feed();
+            reset_pace();
+            RACE_EPOCH.fetch_add(1, Ordering::Relaxed);
+        }
+        LAST_TELEM_MS.store(now_ms, Ordering::Relaxed);
         if let Ok(mut b) = telem_buf().lock() {
             b.insert(gate, t);
         }
+        let course = crate::race::course_distance() as f32;
+        // Finish-line crossing: the FIRST frame a Uma reaches the course distance, capture its finish
+        // rank (the order it crossed) so the tower freezes that order during the run-out.
+        if course > 0.0 && t.distance >= course {
+            let unranked = finish_rank().lock().map(|m| !m.contains_key(&gate)).unwrap_or(false);
+            if unranked {
+                let rank = FINISH_NEXT.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Ok(mut m) = finish_rank().lock() {
+                    m.insert(gate, rank);
+                }
+            }
+        }
+        // Pace history: sample the FOLLOWED Uma's speed at its current race progress (works in
+        // telemetry-only too, since this runs whenever telemetry is on — not just under freecam).
+        if gate == TARGET_GATE.load(Ordering::Relaxed) && course > 0.0 && t.speed > 0.5 {
+            push_pace(t.distance / course, t.speed);
+        }
     }
 
-    if gate != TARGET_GATE.load(Ordering::Relaxed) {
+    // Camera capture below is freecam-only (telemetry needs no camera control).
+    if !fc || gate != TARGET_GATE.load(Ordering::Relaxed) {
         return ret;
     }
     // Apply this circuit's DEFAULT preset once the track id is known (it may be 0 at race start,
@@ -1397,8 +2297,26 @@ unsafe extern "C" fn on_run_motion(this: *mut c_void, mi: *mut c_void) -> f32 {
         load_default_pose();
         RACE_POSE_LOADED.store(true, Ordering::Relaxed);
     }
-    // Followed Uma only: skill feed.
+    // Followed Uma only: skill feed + live outlook.
     update_skill_feed(this);
+    update_active_skills(this); // pure field walk, no managed call → safe
+    update_follow_state(this); // kakari / position-keep / down-slope (AI real getters)
+    // Spurt sustainability: call the AI's REAL getter (unique RVA, not the HorseRaceInfo stub),
+    // and only once the spurt phase has started (phase>=2) so the calculator is populated. Guarded
+    // by a non-null AI pointer.
+    {
+        let ph_off = PHASE_OFF.load(Ordering::Relaxed);
+        let in_spurt = ph_off != 0 && ((this as usize + ph_off) as *const i32).read_unaligned() >= 2;
+        let sg = AI_SPURT_GET.load(Ordering::Relaxed);
+        let ai_off = AI_OFF.load(Ordering::Relaxed);
+        if in_spurt && sg != 0 && ai_off != 0 {
+            let ai = ((this as usize + ai_off) as *const *mut c_void).read_unaligned();
+            if !ai.is_null() {
+                let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 = std::mem::transmute(sg);
+                SPURT_OUTLOOK.store(f(ai, std::ptr::null_mut()), Ordering::Relaxed);
+            }
+        }
+    }
     let off = POS_OFF.load(Ordering::Relaxed);
     if off == 0 {
         return ret;
@@ -1553,35 +2471,102 @@ fn game_focused() -> bool {
     }
 }
 
+// Rebind capture: the menu sets this to an RdKey index; the input thread then binds the next key
+// the user presses to that action. -1 = not capturing.
+static RD_CAPTURE: AtomicI32 = AtomicI32::new(-1);
+/// Arm a rebind: the next key pressed becomes action `idx`'s bind (-1 to cancel). Called from the menu.
+pub fn rd_capture_start(idx: i32) {
+    RD_CAPTURE.store(idx, Ordering::Relaxed);
+}
+/// Which action is currently waiting for a key (-1 = none). The menu shows "press a key…" for it.
+pub fn rd_capturing() -> i32 {
+    RD_CAPTURE.load(Ordering::Relaxed)
+}
+
+/// First pressed key among the bindable candidates (mouse buttons + bare modifiers excluded).
+fn scan_pressed_vk() -> Option<i32> {
+    const CAND: &[i32] = &[
+        0x08, 0x09, 0x0D, 0x20, // Backspace Tab Enter Space
+        0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, // PgUp PgDn End Home arrows
+        0x2D, 0x2E, // Insert Delete
+    ];
+    for &vk in CAND {
+        if vk_down(vk) {
+            return Some(vk);
+        }
+    }
+    for vk in 0x30..=0x5A {
+        if vk_down(vk) {
+            return Some(vk);
+        }
+    } // 0-9, A-Z
+    for vk in 0x60..=0x6F {
+        if vk_down(vk) {
+            return Some(vk);
+        }
+    } // numpad
+    for vk in 0x70..=0x7B {
+        if vk_down(vk) {
+            return Some(vk);
+        }
+    } // F1-F12
+    for vk in 0xBA..=0xC0 {
+        if vk_down(vk) {
+            return Some(vk);
+        }
+    } // ; = , - . / `
+    for vk in 0xDB..=0xDE {
+        if vk_down(vk) {
+            return Some(vk);
+        }
+    } // [ \ ] '
+    None
+}
+
 fn input_tick() {
     if !ENABLED.load(Ordering::Relaxed) || !game_focused() {
         return;
     }
+    // Rebind mode: capture the next key for the armed action (Escape cancels). Don't drive the
+    // camera while binding so the captured key doesn't also move the view.
+    let cap = RD_CAPTURE.load(Ordering::Relaxed);
+    if cap >= 0 {
+        if vk_down(0x1B) {
+            RD_CAPTURE.store(-1, Ordering::Relaxed);
+        } else if let Some(vk) = scan_pressed_vk() {
+            crate::settings::set_rd_key(cap as usize, vk);
+            RD_CAPTURE.store(-1, Ordering::Relaxed);
+        }
+        return;
+    }
     mouse_drag_tick(); // left-drag = orbit/look
 
-    // Bindings: mouse drag (orbit/look) + arrows + I/K (height) + [ ] (switch Uma) + P (save).
-    if vk_down(0x25) { setf(&ORBIT_YAW, getf(&ORBIT_YAW) - ORBIT_STEP); } // ← left
-    if vk_down(0x27) { setf(&ORBIT_YAW, getf(&ORBIT_YAW) + ORBIT_STEP); } // → right
-    // ↑ / ↓ = zoom the orbit distance (toward / away from the Uma).
-    if vk_down(0x26) { let c = getf(&DIST); setf(&DIST, (c - (c * 0.06 + 0.25)).clamp(DIST_MIN, DIST_MAX)); }
-    if vk_down(0x28) { let c = getf(&DIST); setf(&DIST, (c + (c * 0.06 + 0.25)).clamp(DIST_MIN, DIST_MAX)); }
-    if vk_down(0x4B) { setf(&EYE_H, getf(&EYE_H) - HEIGHT_STEP); } // K = lower height
-    if vk_down(0x49) { setf(&EYE_H, getf(&EYE_H) + HEIGHT_STEP); } // I = raise height
+    // All key binds are rebindable (settings::rd_key, RdKey order). 1-9 stay fixed = gate numbers.
+    let k = |i: usize| crate::settings::rd_key(i);
+    if vk_down(k(0)) { setf(&ORBIT_YAW, getf(&ORBIT_YAW) - ORBIT_STEP); } // orbit left
+    if vk_down(k(1)) { setf(&ORBIT_YAW, getf(&ORBIT_YAW) + ORBIT_STEP); } // orbit right
+    if vk_down(k(2)) { let c = getf(&DIST); setf(&DIST, (c - (c * 0.06 + 0.25)).clamp(DIST_MIN, DIST_MAX)); } // zoom in
+    if vk_down(k(3)) { let c = getf(&DIST); setf(&DIST, (c + (c * 0.06 + 0.25)).clamp(DIST_MIN, DIST_MAX)); } // zoom out
+    if vk_down(k(4)) { setf(&EYE_H, getf(&EYE_H) + HEIGHT_STEP); } // raise height
+    if vk_down(k(5)) { setf(&EYE_H, getf(&EYE_H) - HEIGHT_STEP); } // lower height
 
-    // [ / ] = follow previous/next Uma (edge-detected).
-    if edge(vk_down(0xDB), &EDGE_LB) {
-        cycle_target(-1);
+    if edge(vk_down(k(6)), &EDGE_LB) {
+        cycle_target(-1); // previous Uma
     }
-    if edge(vk_down(0xDD), &EDGE_RB) {
-        cycle_target(1);
+    if edge(vk_down(k(7)), &EDGE_RB) {
+        cycle_target(1); // next Uma
+    }
+    // 1-9 = jump straight to the Uma in that gate (edge-detected; ignored if no horse there).
+    for i in 0..9 {
+        if edge(vk_down(0x31 + i as i32), &EDGE_NUM[i]) {
+            follow_gate(i as i32 + 1);
+        }
     }
 
-    // O = cycle to the next saved preset of this circuit (apply live).
-    if edge(vk_down(0x4F), &EDGE_O) {
-        cycle_preset();
+    if edge(vk_down(k(8)), &EDGE_O) {
+        cycle_preset(); // cycle saved presets
     }
-    // P = save the current pose into the active preset (creates the first one if none).
-    if edge(vk_down(0x50), &EDGE_P) {
+    if edge(vk_down(k(9)), &EDGE_P) {
         save_active_preset();
         if let Ok(mut s) = last_pose().lock() {
             *s = format!(
@@ -1590,12 +2575,17 @@ fn input_tick() {
             );
         }
     }
+    // First-person view is DISABLED (experimental: the world geometry isn't drawn on some elevated /
+    // curved courses → a blank "void"). Kept out of release builds; freecam stays 3rd-person only.
+    let _ = &EDGE_V;
 }
 
 static EDGE_O: AtomicBool = AtomicBool::new(false);
 static EDGE_P: AtomicBool = AtomicBool::new(false);
+static EDGE_V: AtomicBool = AtomicBool::new(false);
 static EDGE_LB: AtomicBool = AtomicBool::new(false);
 static EDGE_RB: AtomicBool = AtomicBool::new(false);
+static EDGE_NUM: [AtomicBool; 9] = [const { AtomicBool::new(false) }; 9]; // 1-9 direct-follow keys
 /// Rising-edge detector: true once per press (so a held key = one action).
 /// NOTE: swap UNCONDITIONALLY — a short-circuited `now && !store.swap(now)` skips the swap
 /// on release (now=false), leaving `store` stuck true so it would only ever fire ONCE.
@@ -1704,6 +2694,25 @@ pub fn install() -> String {
         }
     }
 
+    // First-person void fix: neutralize the per-object occlusion culler.
+    let vissw = il2cpp::class("Gallop.RaceRendererVisibilitySwitcher");
+    unsafe {
+        let m_reset = il2cpp::method(vissw, "ResetRenderer", 0);
+        RESET_RENDERER_FN.store(il2cpp::method_pointer(m_reset) as usize, Ordering::Relaxed);
+        RESET_RENDERER_MI.store(m_reset as usize, Ordering::Relaxed);
+        if hook_at(il2cpp::method_pointer(il2cpp::method(vissw, "UpdateRenderer", 2)), on_vis_update as *const (), &TR_VISSW, &D_VISSW) {
+            got.push("vissw");
+        }
+    }
+
+    // FP fog: resolve UnityEngine.RenderSettings static setters (called on FP toggle).
+    let rs = il2cpp::class("UnityEngine.RenderSettings");
+    SET_FOG.store(il2cpp::method(rs, "set_fog", 1) as usize, Ordering::Relaxed);
+    SET_FOGMODE.store(il2cpp::method(rs, "set_fogMode", 1) as usize, Ordering::Relaxed);
+    SET_FOGSTART.store(il2cpp::method(rs, "set_fogStartDistance", 1) as usize, Ordering::Relaxed);
+    SET_FOGEND.store(il2cpp::method(rs, "set_fogEndDistance", 1) as usize, Ordering::Relaxed);
+    SET_FOGCOLOR.store(il2cpp::method(rs, "set_fogColor", 1) as usize, Ordering::Relaxed);
+
     // transform icalls
     unsafe {
         let setpos = il2cpp::resolve_icall("UnityEngine.Transform::set_position_Injected(UnityEngine.Vector3&)");
@@ -1745,6 +2754,12 @@ pub fn install() -> String {
         ("_distance", &DIST_OFF),
         ("<IsHpEmptyOnRace>k__BackingField", &HPEMPTY_OFF),
         ("_phase", &PHASE_OFF),
+        ("<IsBadStart>k__BackingField", &BADSTART_OFF),
+        ("<IsCompeteFight>k__BackingField", &COMPFIGHT_OFF),
+        ("<IsCompeteTop>k__BackingField", &COMPTOP_OFF),
+        ("<BlockFrontContinueTime>k__BackingField", &BLOCKFRONT_OFF),
+        ("<PrevOrder>k__BackingField", &PREVORDER_OFF),
+        ("_defeat", &DEFEAT_OFF),
     ] {
         if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.HorseRaceInfo"), name) {
             slot.store(off, Ordering::Relaxed);
@@ -1753,6 +2768,29 @@ pub fn install() -> String {
     if HP_OFF.load(Ordering::Relaxed) != 0 {
         got.push("telem");
     }
+    // Identity chain for the broadcast tower: HorseRaceInfo._horseData → HorseData
+    // (.<Popularity>, ._responseHorseData) → RaceHorseData.running_style.
+    if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.HorseRaceInfo"), "_horseData") {
+        HDATA_OFF.store(off, Ordering::Relaxed);
+    }
+    let hdc = il2cpp::class("Gallop.HorseData");
+    if let Some(off) = il2cpp::field_offset(hdc, "<Popularity>k__BackingField") {
+        POP_OFF.store(off, Ordering::Relaxed);
+    }
+    if let Some(off) = il2cpp::field_offset(hdc, "_responseHorseData") {
+        RESP_OFF.store(off, Ordering::Relaxed);
+    }
+    if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.RaceHorseData"), "running_style") {
+        RSTYLE_OFF.store(off, Ordering::Relaxed);
+    }
+    // Trainer identity (lobby races): RaceHorseData.trainer_name + .viewer_id.
+    let rhd = il2cpp::class("Gallop.RaceHorseData");
+    if let Some(off) = il2cpp::field_offset(rhd, "trainer_name") {
+        TNAME_OFF.store(off, Ordering::Relaxed);
+    }
+    if let Some(off) = il2cpp::field_offset(rhd, "viewer_id") {
+        VIEWER_OFF.store(off, Ordering::Relaxed);
+    }
     // Skill activation feed: HorseRaceInfo._skillManager → SkillManager._usedSkillIdList,
     // + MasterDataUtil.GetSkillName(id) for names.
     if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.HorseRaceInfo"), "_skillManager") {
@@ -1760,6 +2798,52 @@ pub fn install() -> String {
     }
     if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.SkillManager"), "_usedSkillIdList") {
         USEDLIST_OFF.store(off, Ordering::Relaxed);
+    }
+    // Spurt sustainability: HorseRaceInfo._horseRaceAI + the AI's REAL getter (HorseRaceAIReplay,
+    // unique RVA — NOT the HorseRaceInfo interface stub).
+    if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.HorseRaceInfo"), "_horseRaceAI") {
+        AI_OFF.store(off, Ordering::Relaxed);
+    }
+    let aisg = il2cpp::method(il2cpp::class("Gallop.HorseRaceAIReplay"), "get_LastSpurtCalcResult", 0);
+    if !aisg.is_null() {
+        AI_SPURT_GET.store(il2cpp::method_pointer(aisg) as usize, Ordering::Relaxed);
+    }
+    // Live race-state getters (kakari / position-keep / down-slope) on HorseRaceAIBase.
+    let aib = il2cpp::class("Gallop.HorseRaceAIBase");
+    for (name, slot) in [
+        ("get_IsTemptation", &KAKARI_GET),
+        ("get_TemptationMode", &TEMPTMODE_GET),
+        ("get_PositionKeepMode", &KEEPMODE_GET),
+        ("get_IsDownSlopeAccelMode", &DOWNHILL_GET),
+    ] {
+        let m = il2cpp::method(aib, name, 0);
+        if !m.is_null() {
+            slot.store(il2cpp::method_pointer(m) as usize, Ordering::Relaxed);
+        }
+    }
+    // Active-skill field walk: SkillManager._skills → SkillBase.{SkillMaster,Details} → SkillDetail.
+    if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.SkillManager"), "_skills") {
+        SKILLS_LIST_OFF.store(off, Ordering::Relaxed);
+    }
+    let sbc = il2cpp::class("Gallop.SkillBase");
+    if let Some(off) = il2cpp::field_offset(sbc, "<SkillMaster>k__BackingField") {
+        SB_MASTER_OFF.store(off, Ordering::Relaxed);
+    }
+    if let Some(off) = il2cpp::field_offset(sbc, "<Details>k__BackingField") {
+        SB_DETAILS_OFF.store(off, Ordering::Relaxed);
+    }
+    let sdc = il2cpp::class("Gallop.SkillDetail");
+    if let Some(off) = il2cpp::field_offset(sdc, "<LeftTime>k__BackingField") {
+        SD_LEFT_OFF.store(off, Ordering::Relaxed);
+    }
+    if let Some(off) = il2cpp::field_offset(sdc, "<Category>k__BackingField") {
+        SD_CAT_OFF.store(off, Ordering::Relaxed);
+    }
+    if let Some(off) = il2cpp::field_offset(sdc, "_isDebuff") {
+        SD_DEBUFF_OFF.store(off, Ordering::Relaxed);
+    }
+    if let Some(off) = il2cpp::field_offset(sdc, "<IsActivated>k__BackingField") {
+        SD_ACT_OFF.store(off, Ordering::Relaxed);
     }
     let mdu = il2cpp::class("Gallop.MasterDataUtil");
     let gsn = il2cpp::method(mdu, "GetSkillName", 1);
@@ -1773,6 +2857,19 @@ pub fn install() -> String {
             }
         };
         GSN_STATIC.store(is_static, Ordering::Relaxed);
+    }
+    // Skill effect-value lookup (in-memory master data; public-safe — no the game data).
+    let wtc = il2cpp::class("Gallop.WorkTrainingChallengeData");
+    let mmget = il2cpp::method(wtc, "get_MasterManager", 0);
+    if !mmget.is_null() {
+        MM_GET.store(il2cpp::method_pointer(mmget) as usize, Ordering::Relaxed);
+        MM_GET_MI.store(mmget as usize, Ordering::Relaxed);
+    }
+    let msd_cls = il2cpp::class("Gallop.MasterSkillData");
+    let sget = il2cpp::method(msd_cls, "Get", 1);
+    if !sget.is_null() {
+        MSD_GET.store(il2cpp::method_pointer(sget) as usize, Ordering::Relaxed);
+        MSD_GET_MI.store(sget as usize, Ordering::Relaxed);
     }
     // HorseData.charaName (string) → Uma display name for the HUD.
     if let Some(off) = il2cpp::field_offset(il2cpp::class("Gallop.HorseData"), "<charaName>k__BackingField") {
@@ -1830,6 +2927,11 @@ pub fn install() -> String {
         let m_depth = il2cpp::method(cam_cls, "get_depth", 0);
         if !m_depth.is_null() {
             CAM_GET_DEPTH.store(il2cpp::method_pointer(m_depth) as usize, Ordering::Relaxed);
+        }
+        // FP near-clip setter (store the Method; called as f(cam, value, methodInfo)).
+        let m_nc = il2cpp::method(cam_cls, "set_nearClipPlane", 1);
+        if !m_nc.is_null() {
+            SET_NEARCLIP.store(m_nc as usize, Ordering::Relaxed);
         }
         let m_fov = il2cpp::method(cam_cls, "get_fieldOfView", 0);
         if !m_fov.is_null() {

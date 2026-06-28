@@ -280,13 +280,13 @@ fn ellipsize(ui: &Ui, s: &str, max_w: f32) -> String {
     for ch in s.chars() {
         let mut probe = out.clone();
         probe.push(ch);
-        probe.push('\u{2026}');
+        probe.push_str(".."); // ASCII marker — the bundled font has no "…" glyph (renders as "?")
         if ui.calc_text_size(&probe)[0] > max_w {
             break;
         }
         out.push(ch);
     }
-    out.push('\u{2026}');
+    out.push_str("..");
     out
 }
 
@@ -340,10 +340,8 @@ pub struct HeavenOverlay {
     intro_auto_started: bool,
 }
 
-// Umamusume header banner — baked RGBA (sky + ground + circular character + nameplate).
-// Local-only art (Cygames IP); the file lives outside the repo and only the private
-// `banner` build embeds it.
-// The menu header banner art.
+// Umamusume header banner — baked RGBA (sky + ground + circular character + nameplate),
+// embedded by the `banner` build.
 #[cfg(all(feature = "banner", not(feature = "oracle")))]
 const BANNER_RGBA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/banner.rgba"));
 #[cfg(feature = "banner")]
@@ -428,7 +426,7 @@ impl HeavenOverlay {
         let cur = crate::fps::current();
         let (ex, ey) = crate::settings::energy_pos();
         Self {
-            show: true,
+            show: false,
             toggle_was_down: false,
             tab: 0,
             prev_tab: 0,
@@ -772,6 +770,10 @@ impl ImguiRenderLoop for HeavenOverlay {
         }
         self.toggle_was_down = key_down;
 
+        // the extra overlay boxes draw on the game's native popup regardless of the
+        // Insert toggle — they belong to the game UI, not the Heaven panel, so
+        // hiding the controls must not hide the prediction box.
+
         // Freecam mouse zoom — works even with the panel hidden (drag/keys are polled in
         // freecam's own input thread). Wheel → zoom, when not over the Heaven panel.
         #[cfg(feature = "freecam")]
@@ -793,6 +795,19 @@ impl ImguiRenderLoop for HeavenOverlay {
             let [dw, _dh] = ui.io().display_size;
             let tx = if self.rail_right { (dw - 300.0 - 14.0).max(0.0) } else { 14.0 };
             draw_freecam_telemetry(ui, tx, 150.0, Condition::FirstUseEver);
+            // Broadcast timing tower (whole field) — opposite rail so it never overlaps the HUD.
+            if crate::settings::tele_tower() {
+                let twx = if self.rail_right { 14.0 } else { (dw - 300.0 - 14.0).max(0.0) };
+                draw_timing_tower(ui, twx, 150.0);
+            }
+            // On-screen marker over the followed Uma's head (world-projected).
+            if crate::settings::tele_marker() {
+                draw_follow_marker(ui);
+            }
+            // Auto battle lower-third (only shows during a duel / photo finish).
+            if crate::settings::tele_battle() {
+                draw_battle_callout(ui);
+            }
         }
 
         // First-launch hint: until the user opens the menu once, show which key opens it
@@ -867,6 +882,8 @@ impl ImguiRenderLoop for HeavenOverlay {
         } else {
             self.draw_menu(ui);
         }
+        // Info panels + info chip — private/full build only (feature `panels`).
+        // The public build ships SuperSkip/FPS/TT without the career/race readers.
 
         if applied {
             self.relayout = false;
@@ -1522,7 +1539,6 @@ impl HeavenOverlay {
                                                         crate::freecam::cycle_target(1);
                                                     }
                                                 }
-                                                ui.text_colored(DIM, "[ ] Uma  \u{00b7}  arrows orbit/zoom  \u{00b7}  I/K height");
                                                 ui.dummy([0.0, 4.0]);
                                                 draw_preset_manager(ui, cw);
                                                 let pose = crate::freecam::captured_pose();
@@ -1530,6 +1546,10 @@ impl HeavenOverlay {
                                                     ui.text_colored(GOOD, pose);
                                                 }
                                             }
+                                        }
+                                        #[cfg(feature = "freecam")]
+                                        Ctrl::Custom(Custom::KeyBinds) => {
+                                            draw_rd_keybinds(ui, cw);
                                         }
                                         #[cfg(feature = "banner")]
                                         Ctrl::Custom(Custom::Intro) => {
@@ -1838,13 +1858,16 @@ impl HeavenOverlay {
                                                     crate::freecam::cycle_target(1);
                                                 }
                                             }
-                                            ui.text_colored(DIM, "[ ] Uma  arrows orbit/zoom  I/K height");
                                             draw_preset_manager(ui, 240.0);
                                             let pose = crate::freecam::captured_pose();
                                             if !pose.is_empty() {
                                                 ui.text_colored(GOOD, pose);
                                             }
                                         }
+                                    }
+                                    #[cfg(feature = "freecam")]
+                                    Ctrl::Custom(Custom::KeyBinds) => {
+                                        draw_rd_keybinds(ui, 240.0);
                                     }
                                     #[cfg(feature = "banner")]
                                     Ctrl::Custom(Custom::Intro) => {
@@ -1943,7 +1966,7 @@ fn nav_icon_idx(name: &str) -> Option<usize> {
         "Gameplay" => 0,    // was Skip (Play crystal)
         "Performance" => 1, // unchanged
         "Visuals" => 3,     // was Intro (Video crystal)
-        "Camera" => 4,      // unchanged
+        "Race Director" => 4, // camera crystal (was "Camera")
         "Interface" => 5,   // was Panels (ViewAll crystal)
         "About" => 7,       // unchanged
         _ => return None,
@@ -1953,11 +1976,12 @@ fn nav_icon_idx(name: &str) -> Option<usize> {
 fn cat_icon(name: &str) -> &'static str {
     match name {
         "Gameplay" => "\u{E768}",    // Play
-        "Camera" => "\u{E722}",      // Camera
+        "Race Director" => "\u{E722}", // Camera (was "Camera")
         "Visuals" => "\u{E790}",     // Brightness/visuals
         "Performance" => "\u{E9D9}", // Speed
         "Interface" => "\u{E8A9}",   // ViewAll
         "About" => "\u{E946}",       // Info
+        "Dev Lab" => "\u{EC7A}",     // DeveloperTools
         _ => "\u{E700}",             // GlobalNav
     }
 }
@@ -2196,6 +2220,93 @@ fn pink_slider_f32(ui: &Ui, id: &str, min: f32, max: f32, val: &mut f32, w: f32)
 }
 
 /// Rounded button with an accent border + hover, auto-sized to its label. Returns clicked.
+/// Human-readable name for a Win32 VK code (for the key-bind UI).
+#[cfg(feature = "freecam")]
+fn vk_name(vk: i32) -> String {
+    match vk {
+        0 => "—".into(),
+        0x08 => "Backspace".into(),
+        0x09 => "Tab".into(),
+        0x0D => "Enter".into(),
+        0x1B => "Esc".into(),
+        0x20 => "Space".into(),
+        0x21 => "PgUp".into(),
+        0x22 => "PgDn".into(),
+        0x23 => "End".into(),
+        0x24 => "Home".into(),
+        0x25 => "Left".into(),
+        0x26 => "Up".into(),
+        0x27 => "Right".into(),
+        0x28 => "Down".into(),
+        0x2D => "Insert".into(),
+        0x2E => "Delete".into(),
+        0x30..=0x39 => ((b'0' + (vk - 0x30) as u8) as char).to_string(),
+        0x41..=0x5A => ((b'A' + (vk - 0x41) as u8) as char).to_string(),
+        0x60..=0x69 => format!("Num{}", vk - 0x60),
+        0x70..=0x7B => format!("F{}", vk - 0x70 + 1),
+        0xBA => ";".into(),
+        0xBB => "=".into(),
+        0xBC => ",".into(),
+        0xBD => "-".into(),
+        0xBE => ".".into(),
+        0xBF => "/".into(),
+        0xC0 => "`".into(),
+        0xDB => "[".into(),
+        0xDC => "\\".into(),
+        0xDD => "]".into(),
+        0xDE => "'".into(),
+        _ => format!("0x{vk:02X}"),
+    }
+}
+
+/// Race Director key-bind editor: one row per action with its current key; click a key then press
+/// the new one (Esc cancels). 1-9 = gate numbers, fixed. Used in both the premium + classic menus.
+#[cfg(feature = "freecam")]
+fn draw_rd_keybinds(ui: &Ui, w: f32) {
+    ui.dummy([0.0, 6.0]);
+    ui.text_colored(GOLD, "Key bindings");
+    ui.text_colored(DIM, "click a key, then press the new one (Esc cancels)");
+    ui.dummy([0.0, 2.0]);
+    let cap = crate::freecam::rd_capturing();
+    // Conflict detection: a VK bound to more than one action is flagged red.
+    let vks: Vec<i32> = (0..11).map(crate::settings::rd_key).collect();
+    let conflict = |i: usize| vks[i] != 0 && vks.iter().filter(|&&v| v == vks[i]).count() > 1;
+    const BINDS: &[(usize, &str)] = &[
+        (0, "Orbit left"),
+        (1, "Orbit right"),
+        (2, "Zoom in"),
+        (3, "Zoom out"),
+        (4, "Raise height"),
+        (5, "Lower height"),
+        (6, "Previous Uma"),
+        (7, "Next Uma"),
+        (8, "Cycle preset"),
+        (9, "Save preset"),
+    ];
+    for &(idx, label) in BINDS {
+        let row_y = ui.cursor_screen_pos()[1];
+        ui.set_cursor_screen_pos([ui.cursor_screen_pos()[0], row_y + 8.0]); // align label to button mid
+        let dup = conflict(idx);
+        ui.text_colored(if dup { BAD } else { [0.86, 0.86, 0.91, 1.0] }, label);
+        if dup {
+            ui.same_line();
+            ui.text_colored(BAD, "(dup)");
+        }
+        ui.same_line_with_pos((w - 92.0).max(108.0));
+        ui.set_cursor_screen_pos([ui.cursor_screen_pos()[0], row_y]);
+        let keytxt = if cap == idx as i32 {
+            "press a key…".to_string()
+        } else {
+            vk_name(crate::settings::rd_key(idx))
+        };
+        if btn(ui, &format!("##rdk{idx}"), &keytxt) {
+            // toggle: clicking the armed one again cancels
+            crate::freecam::rd_capture_start(if cap == idx as i32 { -1 } else { idx as i32 });
+        }
+        ui.dummy([0.0, 3.0]);
+    }
+}
+
 fn btn(ui: &Ui, id: &str, label: &str) -> bool {
     let (pad, h) = (15.0, 32.0);
     let ts = ui.calc_text_size(label);
@@ -2461,6 +2572,420 @@ fn uma_icon_tex(chara_id: i32) -> Option<imgui::TextureId> {
     UMA_TEX.with(|m| m.borrow().get(&chara_id).copied())
 }
 
+/// Short broadcast label for a `DefeatType` (why the Uma can't win). None = no reason yet / win.
+#[cfg(feature = "freecam")]
+fn defeat_label(d: i32) -> Option<&'static str> {
+    match d {
+        2 => Some("LOSING"),
+        3 => Some("STYLE CONGESTION"),
+        4 => Some("KAKARI"),
+        5 => Some("GUTS GIVING OUT"),
+        6 => Some("OUT OF STAMINA"),
+        7 | 8 => Some("SPURT FAILED"),
+        9 => Some("SKILL-STARVED"),
+        10 => Some("BOXED IN"),
+        11 => Some("OUTPACED"),
+        12 => Some("WRONG DISTANCE"),
+        13 => Some("WRONG SURFACE"),
+        14 => Some("LOW MOTIVATION"),
+        _ => None, // 0 Null, 1 Win
+    }
+}
+
+/// Short label for a `PositionKeepMode` (1 SpeedUp .. 4 PaseDown). None = not keeping position.
+#[cfg(feature = "freecam")]
+fn keep_label(m: i32) -> Option<&'static str> {
+    match m {
+        1 => Some("SPEED-UP"),
+        2 => Some("OVERTAKE"),
+        3 => Some("PACE-UP"),
+        4 => Some("PACE-DOWN"),
+        _ => None,
+    }
+}
+
+/// Colour for a skill effect category (SkillCategory: 0 Speed, 1 Heal, 2 Accel; debuff = red).
+#[cfg(feature = "freecam")]
+fn skill_cat_color(category: i32, debuff: bool) -> [f32; 4] {
+    if debuff {
+        BAD
+    } else {
+        match category {
+            1 => GOOD,  // Heal
+            2 => WARN,  // Accel
+            _ => BLUE,  // Speed / other
+        }
+    }
+}
+
+/// Running-style accent colour for the timing-tower chip (1 Nige .. 4 Oikomi).
+#[cfg(feature = "freecam")]
+fn style_color(style: i32) -> [f32; 4] {
+    match style {
+        1 => [0.886, 0.294, 0.290, 1.0], // Nige   — red    (front runner)
+        2 => [0.937, 0.624, 0.153, 1.0], // Senko  — amber  (stalker)
+        3 => [0.216, 0.541, 0.866, 1.0], // Sashi  — blue   (closer)
+        4 => [0.690, 0.482, 0.878, 1.0], // Oikomi — purple (deep closer)
+        _ => [0.45, 0.45, 0.50, 1.0],    // unknown — gray
+    }
+}
+
+/// Auto-scaled sparkline (rolling pace trace): track background + line + a head dot. Reserves a
+/// [w,h] layout box at the cursor so the rest of the row flows normally.
+#[cfg(feature = "freecam")]
+fn spark(ui: &Ui, samples: &[f32], total: usize, w: f32, h: f32, col: [f32; 4]) {
+    let p = ui.cursor_screen_pos();
+    {
+        let dl = ui.get_window_draw_list();
+        dl.add_rect(p, [p[0] + w, p[1] + h], TRACK_BG).filled(true).rounding(3.0).build();
+        if samples.len() >= 2 {
+            let mn = samples.iter().cloned().fold(f32::MAX, f32::min);
+            let mx = samples.iter().cloned().fold(f32::MIN, f32::max);
+            // Small floor only — let the natural speed variation fill the height (lively trace),
+            // but avoid a divide-by-near-zero when the speed is perfectly flat.
+            let range = (mx - mn).max(0.8);
+            let n = samples.len();
+            let pad = 2.5;
+            // x maps to RACE PROGRESS (i / total), not the sample count — so the line fills only the
+            // left fraction reached so far and grows rightward over the whole race.
+            let denom = (total.max(2) - 1) as f32;
+            let plot = |i: usize, v: f32| -> [f32; 2] {
+                let t = (i as f32 / denom).min(1.0);
+                [p[0] + pad + t * (w - 2.0 * pad), p[1] + pad + (1.0 - (v - mn) / range) * (h - 2.0 * pad)]
+            };
+            for i in 1..n {
+                dl.add_line(plot(i - 1, samples[i - 1]), plot(i, samples[i]), col).thickness(1.6).build();
+            }
+            dl.add_circle(plot(n - 1, samples[n - 1]), 2.5, col).filled(true).build();
+        }
+    }
+    ui.dummy([w, h]);
+}
+
+/// On-screen marker over the followed Uma's head — a gold chevron pointing down at her, so you
+/// never lose your runner in the pack. World→screen is projected on the game thread
+/// (`freecam::follow_marker`); here we just flip Y into imgui space and draw.
+#[cfg(feature = "freecam")]
+fn draw_follow_marker(ui: &Ui) {
+    let [dw, dh] = ui.io().display_size;
+    let (x, y) = match crate::freecam::project_head_marker(dw, dh) {
+        Some(p) => p,
+        None => return,
+    };
+    if !x.is_finite() || !y.is_finite() || x < -64.0 || x > dw + 64.0 || y < -64.0 || y > dh + 64.0 {
+        return;
+    }
+    // Downward chevron: tip at (x, y), wings above. Filled gold + dark outline for contrast.
+    let s = 11.0;
+    let tip = [x, y];
+    let l = [x - s, y - s * 1.45];
+    let r = [x + s, y - s * 1.45];
+    let dl = ui.get_background_draw_list();
+    dl.add_triangle(tip, l, r, GOLD).filled(true).build();
+    dl.add_triangle(tip, l, r, [0.05, 0.04, 0.08, 0.95]).thickness(1.5).build();
+}
+
+/// Auto-triggered "battle" lower-third — a broadcast callout centred near the bottom of the
+/// screen when the followed Uma is locked in a duel (`IsCompeteFight`) or a tight late-race
+/// finish. Two horses head-to-head: name, stamina, speed, the gap + who's closing.
+#[cfg(feature = "freecam")]
+fn draw_battle_callout(ui: &Ui) {
+    let tv = match crate::freecam::telemetry() {
+        Some(t) => t,
+        None => return,
+    };
+    let f = tv.followed;
+    let rival = match tv.rival {
+        Some(r) => r,
+        None => return,
+    };
+    // Trigger: the game's own duel flag, or a sub-metre gap during the final spurt (photo finish).
+    let photo = tv.gap < 0.8 && f.spurt;
+    if !(f.fight || (tv.gap < 1.0 && f.spurt)) {
+        return;
+    }
+    let tele = crate::settings::tele_scale();
+    let base_w = 410.0; // content width at scale 1.0
+    let [dw, dh] = ui.io().display_size;
+    let w0 = base_w * tele;
+    // Default = centred lower-third; movable + RESIZABLE (drag the corner to scale), remembered.
+    let (cx, cy) = (((dw - w0) * 0.5).max(0.0), (dh - 168.0 * tele).max(0.0));
+    let saved = crate::settings::win_rect("battle");
+    let (px, py) = saved.map(|r| (r[0], r[1])).unwrap_or((cx, cy));
+    let (sw, sh) = saved
+        .filter(|r| r[2] > 60.0 && r[3] > 40.0)
+        .map(|r| (r[2], r[3]))
+        .unwrap_or((w0, 130.0 * tele));
+    let sta = |hp: f32, max: f32| if max > 0.0 { (hp / max).clamp(0.0, 1.0) } else { 0.0 };
+    let bc = |r: f32| if r > 0.5 { GOOD } else if r > 0.25 { WARN } else { BAD };
+    let fr = sta(f.hp, f.max_hp);
+    let rr = sta(rival.hp, rival.max_hp);
+    let _style = panel_style(ui);
+    ui.window("Heaven \u{00b7} Battle")
+        .position([px, py], Condition::FirstUseEver)
+        .size([sw, sh], Condition::FirstUseEver)
+        .title_bar(false)
+        .scroll_bar(false)
+        .build(|| {
+            let scale = (ui.window_size()[0] / base_w).clamp(0.55, 4.0);
+            ui.set_window_font_scale(scale);
+            let w = ui.window_size()[0];
+            // header: badge + gap + closing rate
+            grade_badge(ui, if photo { "PHOTO FINISH" } else { "FIGHT" }, if photo { GOLD } else { PINK });
+            ui.same_line();
+            ui.text_colored(DIM, &format!("{:.1} m apart", tv.gap));
+            let closing = f.speed - rival.speed; // >0 = the followed Uma is closing / pulling away
+            ui.same_line();
+            val(ui, if closing >= 0.0 { GOOD } else { BAD }, &format!("{closing:+.1} m/s"));
+            ui.dummy([0.0, 4.0]);
+
+            let half = (w - 28.0 * scale) * 0.5;
+            let bw = half - 6.0 * scale;
+            // names
+            ui.text_colored(GOLD, &tv.followed_name);
+            ui.same_line_with_pos(half + 14.0 * scale);
+            ui.text_colored([0.9, 0.9, 0.94, 1.0], &tv.rival_name);
+            // stamina bars
+            pbar(ui, fr, bw, 13.0 * scale, bc(fr), &format!("{:.0}%", fr * 100.0));
+            ui.same_line_with_pos(half + 14.0 * scale);
+            pbar(ui, rr, bw, 13.0 * scale, bc(rr), &format!("{:.0}%", rr * 100.0));
+            // speeds
+            val(ui, BLUE, &format!("{:.1} m/s", f.speed));
+            ui.same_line_with_pos(half + 14.0 * scale);
+            val(ui, BLUE, &format!("{:.1} m/s", rival.speed));
+            persist_window(ui, "battle"); // movable + remembered like the other panels
+        });
+}
+
+// Distinct dot colours for the trainer column — keyed by viewer_id so a person's 1-3 Umas share one.
+#[cfg(feature = "freecam")]
+const TRAINER_PALETTE: [[f32; 4]; 8] = [
+    [0.95, 0.42, 0.46, 1.0],
+    [0.40, 0.74, 0.96, 1.0],
+    [0.56, 0.85, 0.45, 1.0],
+    [0.96, 0.76, 0.36, 1.0],
+    [0.76, 0.56, 0.96, 1.0],
+    [0.36, 0.86, 0.80, 1.0],
+    [0.96, 0.56, 0.82, 1.0],
+    [0.82, 0.80, 0.55, 1.0],
+];
+
+thread_local! {
+    static TOWER_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+}
+
+/// Broadcast timing tower — the WHOLE field, leader-first, F1-style: position, running-style
+/// colour chip, name, interval to the horse directly ahead, a stamina micro-bar, and live state
+/// ticks. Data from `freecam::field_rows()` (all pure HorseRaceInfo reads). Read-only.
+#[cfg(feature = "freecam")]
+fn draw_timing_tower(ui: &Ui, x: f32, y: f32) {
+    let rows = crate::freecam::field_rows();
+    if rows.is_empty() {
+        return;
+    }
+    let epoch = crate::freecam::race_epoch();
+    if TOWER_EPOCH.with(|c| {
+        let prev = c.get();
+        c.set(epoch);
+        prev != epoch
+    }) {
+        ANIM.with(|m| m.borrow_mut().retain(|k, _| !k.starts_with("twr_y")));
+    }
+    let tele = crate::settings::tele_scale();
+    let has_trainers = rows.iter().any(|r| !r.trainer.is_empty());
+    let base_w = 312.0 + if has_trainers { 116.0 } else { 0.0 }; // content width at scale 1.0
+    let base_h = 34.0 + rows.len() as f32 * 19.0 + 22.0; // header + rows + hint, at scale 1.0
+    let saved = crate::settings::win_rect("tower");
+    let (px, py) = saved.map(|r| (r[0], r[1])).unwrap_or((x, y));
+    let (sw, sh) = saved
+        .filter(|r| r[2] > 60.0 && r[3] > 40.0)
+        .map(|r| (r[2], r[3]))
+        .unwrap_or((base_w * tele, base_h * tele));
+    let _style = panel_style(ui);
+    ui.window("Heaven \u{00b7} Timing Tower")
+        .position([px, py], Condition::FirstUseEver)
+        .size([sw, sh], Condition::FirstUseEver)
+        .title_bar(false)
+        .scroll_bar(false)
+        .build(|| {
+            // Resizable: dragging the window's corner drives the font scale, so the whole tower grows
+            // or shrinks with the drag (the natural content width is `base_w` at scale 1.0).
+            let scale = (ui.window_size()[0] / base_w).clamp(0.55, 4.0);
+            ui.set_window_font_scale(scale);
+            // Column x-offsets from the row's left edge: pos-chip | style-bar | name(+tags) | interval | sta-bar.
+            let cw = 20.0 * scale; // F1-style position chip (white, dark number)
+            let style_w = 4.0 * scale; // running-style colour bar (F1 team-colour slot)
+            let c_name = cw + style_w + 9.0 * scale;
+            // Trainer column (lobby races only): a per-trainer colour dot + name, so the human owners
+            // and their 1-3-Uma teams are visible. Shifts the interval/bar columns right when shown.
+            let c_trainer = 130.0 * scale;
+            let tshift = if has_trainers { 116.0 * scale } else { 0.0 };
+            let c_int = 176.0 * scale + tshift;
+            let c_bar = 252.0 * scale + tshift; // wide enough that the leader's "LEADER" never reaches the bar
+            let bar_w = 56.0 * scale;
+            let rowh = 19.0 * scale;
+            let row_w = c_bar + bar_w + 4.0;
+            let chh = 15.0 * scale;
+            let th = ui.calc_text_size("0")[1]; // line height (already font-scaled)
+
+            // ── header: race phase + distance covered + a thin progress bar (F1 "LAP x/y" slot) ──
+            let course = crate::race::course_distance() as f32;
+            let leader_dist = rows.first().map(|r| r.dist).unwrap_or(0.0);
+            let progress = if course > 0.0 { (leader_dist / course).clamp(0.0, 1.0) } else { 0.0 };
+            let remaining = (course - leader_dist).max(0.0);
+            let phase = if course <= 0.0 {
+                "ORDER"
+            } else if remaining <= 600.0 {
+                "FINAL 3F"
+            } else if progress < 0.166 {
+                "START"
+            } else if progress < 0.666 {
+                "MIDDLE"
+            } else if progress < 0.833 {
+                "END"
+            } else {
+                "LAST SPURT"
+            };
+            panel_title(ui, phase);
+            if course > 0.0 {
+                ui.same_line();
+                val(ui, DIM, &format!("{:.0}/{:.0} m", leader_dist.min(course), course));
+            }
+            {
+                let gp = ui.cursor_screen_pos();
+                let by = gp[1] + 2.0;
+                let dl = ui.get_window_draw_list();
+                dl.add_rect([gp[0], by], [gp[0] + row_w, by + 3.0 * scale], TRACK_BG).filled(true).rounding(2.0).build();
+                if progress > 0.0 {
+                    dl.add_rect([gp[0], by], [gp[0] + row_w * progress, by + 3.0 * scale], GRAD_R).filled(true).rounding(2.0).build();
+                }
+            }
+            ui.dummy([row_w, 7.0 * scale]); // progress-bar gap + pins window width so columns never reflow
+
+            // Rows are positioned by an ANIMATED slot index (eased toward their real order), so a Uma
+            // that gains/loses a place SLIDES up/down like an F1 timing tower instead of jumping.
+            let base = ui.cursor_screen_pos();
+            for (i, r) in rows.iter().enumerate() {
+                let ai = anim_step(&format!("twr_y{}", r.gate), i as f32, 8.0);
+                let p = [base[0], base[1] + ai * rowh];
+                // Whole-row click target → follow that Uma (drawn-over content is non-interactive).
+                ui.set_cursor_screen_pos(p);
+                let clicked = ui.invisible_button(format!("##twr{}", r.gate), [row_w, rowh]);
+                let hovered = ui.is_item_hovered();
+                if clicked {
+                    crate::freecam::follow_gate(r.gate);
+                }
+                ui.set_cursor_screen_pos(p);
+                // row background: followed = accent strip, hovered = faint highlight
+                if r.followed || hovered {
+                    let bg = if r.followed { BADGE_BG } else { [1.0, 1.0, 1.0, 0.06] };
+                    ui.get_window_draw_list()
+                        .add_rect([p[0] - 4.0, p[1]], [p[0] + row_w, p[1] + rowh], bg)
+                        .filled(true)
+                        .rounding(4.0)
+                        .build();
+                }
+                // vertically-centred baselines for this row
+                let ty = p[1] + (rowh - th) * 0.5;
+                let cy = p[1] + (rowh - chh) * 0.5;
+                // Position chip flashes on a place change: GREEN when the Uma gains a position, RED
+                // when it loses one, fading back to the base colour over ~1.5 s (a per-gate eased value
+                // bumped to ±1 on the change). Replaces the old "+n" text indicator.
+                let fkey = format!("twr_flash{}", r.gate);
+                if r.trend > 0 {
+                    anim_set(&fkey, 2.6); // headroom > 1 → the chip holds full-bright before fading
+                } else if r.trend < 0 {
+                    anim_set(&fkey, -2.6);
+                }
+                // Decay slowly; clamp the displayed value to ±1 so it stays full-bright for ~0.8 s
+                // (while |raw|>1), then fades over ~2.5 s — long enough to clearly read green/red.
+                let flash = anim_step(&fkey, 0.0, 1.3).clamp(-1.0, 1.0);
+                // F1 position chip: plate + dark number (leader = gold) + a running-style colour bar.
+                {
+                    let dl = ui.get_window_draw_list();
+                    let base_chip = if r.pos == 1 { GOLD } else { [0.92, 0.92, 0.95, 1.0] };
+                    let chip_bg = if flash > 0.03 {
+                        lerp_col(base_chip, [0.26, 0.80, 0.40, 1.0], flash.min(1.0))
+                    } else if flash < -0.03 {
+                        lerp_col(base_chip, [0.92, 0.30, 0.30, 1.0], (-flash).min(1.0))
+                    } else {
+                        base_chip
+                    };
+                    dl.add_rect([p[0], cy], [p[0] + cw, cy + chh], chip_bg).filled(true).rounding(3.0).build();
+                    let lab = format!("{}", r.pos);
+                    let ts = ui.calc_text_size(&lab);
+                    dl.add_text([p[0] + (cw - ts[0]) * 0.5, cy + (chh - ts[1]) * 0.5], [0.07, 0.05, 0.10, 1.0], &lab);
+                    let sx = p[0] + cw + 3.0 * scale;
+                    dl.add_rect([sx, cy], [sx + style_w, cy + chh], style_color(r.style)).filled(true).rounding(1.5).build();
+                }
+                // State tag (computed FIRST so the name reserves room for it and never overlaps the
+                // trainer column / interval). One compact coloured label. (Trend is shown by the chip.)
+                // Only the EXCEPTIONAL per-Uma states tag here. SPURT is omitted: in the final 3F every
+                // Uma spurts (the header already says FINAL 3F), so a per-row SPURT chip is just noise
+                // and used to squeeze the names. FADING (gassed) is what distinguishes the non-spurters.
+                let tag = if r.exhausted {
+                    Some(("FADING", BAD))
+                } else if r.blocked {
+                    Some(("BLOCKED", WARN))
+                } else if r.fight {
+                    Some(("FIGHT", PINK))
+                } else {
+                    None
+                };
+                let tag_w = tag.map(|(l, _)| ui.calc_text_size(l)[0] + 6.0 * scale).unwrap_or(0.0);
+                // name + tag must fit before the trainer column (lobby races) or the interval column.
+                let zone_end = if has_trainers { p[0] + c_trainer } else { p[0] + c_int };
+                let name_max = (zone_end - tag_w - (p[0] + c_name) - 4.0).max(28.0);
+                let nm = ellipsize(ui, &r.name, name_max);
+                let ncol = if r.exhausted {
+                    BAD
+                } else if r.followed {
+                    GOLD
+                } else {
+                    [0.93, 0.93, 0.96, 1.0]
+                };
+                ui.set_cursor_screen_pos([p[0] + c_name, ty]);
+                ui.text_colored(ncol, &nm);
+                if let Some((label, col)) = tag {
+                    let tx = p[0] + c_name + ui.calc_text_size(&nm)[0] + 6.0 * scale;
+                    ui.get_window_draw_list().add_text([tx, ty], col, label);
+                }
+                // trainer (lobby races): a per-trainer colour dot + name, so the human owners and
+                // their 1-3-Uma teams are visible. Same viewer_id → same dot colour → same person.
+                if has_trainers && !r.trainer.is_empty() {
+                    let tcol = TRAINER_PALETTE[(r.viewer_id.unsigned_abs() % TRAINER_PALETTE.len() as u64) as usize];
+                    let dty = p[1] + (rowh - 6.0 * scale) * 0.5;
+                    ui.get_window_draw_list()
+                        .add_rect([p[0] + c_trainer, dty], [p[0] + c_trainer + 6.0 * scale, dty + 6.0 * scale], tcol)
+                        .filled(true)
+                        .rounding(3.0)
+                        .build();
+                    let tx0 = p[0] + c_trainer + 11.0 * scale;
+                    let tnm = ellipsize(ui, &r.trainer, (p[0] + c_int - tx0 - 4.0).max(24.0));
+                    ui.set_cursor_screen_pos([tx0, ty]);
+                    ui.text_colored([0.74, 0.72, 0.84, 1.0], &tnm);
+                }
+                // interval as a TIME gap (F1-style): metres behind ahead / this Uma's speed.
+                ui.set_cursor_screen_pos([p[0] + c_int, ty]);
+                if r.pos == 1 {
+                    val(ui, GOLD, "LEADER");
+                } else {
+                    let tgap = r.interval / r.speed.max(1.0);
+                    ui.text_colored([0.85, 0.85, 0.90, 1.0], &format!("+{:.1}s", tgap));
+                }
+                // stamina micro-bar (vertically centred)
+                ui.set_cursor_screen_pos([p[0] + c_bar, p[1] + (rowh - 12.0 * scale) * 0.5]);
+                let col = if r.sta > 0.5 { GOOD } else if r.sta > 0.25 { WARN } else { BAD };
+                pbar(ui, r.sta, bar_w, 12.0 * scale, col, "");
+            }
+            // reserve the full rows height so the window auto-sizes and the hint sits below the rows
+            ui.set_cursor_screen_pos([base[0], base[1] + rows.len() as f32 * rowh]);
+            ui.dummy([0.0, 2.0]);
+            ui.text_colored(DIM, "click a row to follow that Uma");
+            persist_window(ui, "tower");
+        });
+}
+
 /// Freecam live telemetry — the followed Uma's stamina/speed/rank + a comparison to the
 /// adjacent rival (the one directly ahead, or the one behind if we're leading). Tied to the
 /// freecam target, so `[ ]` switches both the camera and this readout. Heaven-themed (drawn,
@@ -2477,29 +3002,41 @@ fn draw_freecam_telemetry(ui: &Ui, x: f32, y: f32, cond: Condition) {
     };
     let bar_col = |r: f32| if r > 0.5 { GOOD } else if r > 0.25 { WARN } else { BAD };
 
-    // Fixed columns (bar never overlaps label/value). c_bar wide enough for "vs rival".
-    let c_bar = 84.0;
-    let bar_w = 104.0;
-    let c_val = 196.0;
-    let row = |ui: &Ui, label: &str, ratio: f32, speed: f32| {
-        ui.text_colored(DIM, label);
-        ui.same_line_with_pos(c_bar);
-        pbar(ui, ratio, bar_w, 13.0, bar_col(ratio), &format!("{:.0}%", ratio * 100.0));
-        ui.same_line_with_pos(c_val);
-        val(ui, BLUE, &format!("{:.1} m/s", speed));
-    };
-
-    // Auto-resize (grows as skills fire — no scrollbar). Only the POSITION is remembered: the
-    // user can move it and it reopens there; the size always fits the content.
+    let tele = crate::settings::tele_scale();
+    let base_w = 300.0; // content width at scale 1.0
+    let show_grade = crate::settings::tele_grade();
+    let show_portrait = crate::settings::tele_portrait();
+    let show_rival = crate::settings::tele_rival();
+    let show_skills = crate::settings::tele_skills();
+    // Resizable + remembered: drag the corner to scale the whole panel (the tower works the same way).
     let _ = cond;
     let saved = crate::settings::win_rect("telemetry");
     let (px, py) = saved.map(|r| (r[0], r[1])).unwrap_or((x, y));
+    let (sw, sh) = saved
+        .filter(|r| r[2] > 60.0 && r[3] > 40.0)
+        .map(|r| (r[2], r[3]))
+        .unwrap_or((base_w * tele, 440.0 * tele));
     let _style = panel_style(ui);
     ui.window("Heaven \u{00b7} Freecam Telemetry")
         .position([px, py], Condition::FirstUseEver)
+        .size([sw, sh], Condition::FirstUseEver)
         .title_bar(false)
-        .always_auto_resize(true)
+        .scroll_bar(false)
         .build(|| {
+            // Width-driven scale: dragging the corner grows/shrinks the whole panel.
+            let scale = (ui.window_size()[0] / base_w).clamp(0.55, 4.0);
+            ui.set_window_font_scale(scale);
+            // Fixed columns (bar never overlaps label/value). c_bar wide enough for "vs rival".
+            let c_bar = 84.0 * scale;
+            let bar_w = 104.0 * scale;
+            let c_val = 196.0 * scale;
+            let row = |ui: &Ui, label: &str, ratio: f32, speed: f32| {
+                ui.text_colored(DIM, label);
+                ui.same_line_with_pos(c_bar);
+                pbar(ui, ratio, bar_w, 13.0, bar_col(ratio), &format!("{:.0}%", ratio * 100.0));
+                ui.same_line_with_pos(c_val);
+                val(ui, BLUE, &format!("{:.1} m/s", speed));
+            };
             panel_title(ui, "LIVE TELEMETRY");
             // Race header: "Hanshin 1600m Mile"
             let header = crate::race::race_header();
@@ -2507,29 +3044,87 @@ fn draw_freecam_telemetry(ui: &Ui, x: f32, y: f32, cond: Condition) {
                 ui.same_line();
                 ui.text_colored(GOLD, &header);
             }
-            if let Some((lbl, col)) = grade_label(crate::race::race_grade()) {
-                ui.same_line();
-                grade_badge(ui, lbl, col);
+            if show_grade {
+                if let Some((lbl, col)) = grade_label(crate::race::race_grade()) {
+                    ui.same_line();
+                    grade_badge(ui, lbl, col);
+                }
             }
             ui.dummy([0.0, 4.0]);
 
             // ── followed Uma ── portrait + name + rank + SPURT badge
-            if let Some(tex) = uma_icon_tex(tv.chara_id) {
-                imgui::Image::new(tex, [42.0, 42.0]).build(ui);
-                ui.same_line();
-                let cp = ui.cursor_screen_pos();
-                ui.set_cursor_screen_pos([cp[0], cp[1] + 13.0]); // center the name to the bigger icon
+            if show_portrait {
+                if let Some(tex) = uma_icon_tex(tv.chara_id) {
+                    imgui::Image::new(tex, [42.0 * scale, 42.0 * scale]).build(ui);
+                    ui.same_line();
+                    let cp = ui.cursor_screen_pos();
+                    ui.set_cursor_screen_pos([cp[0], cp[1] + 13.0 * scale]); // center name to the icon
+                }
             }
             ui.text_colored(GOLD, &tv.followed_name);
             ui.same_line();
             val(ui, ACCENT, &format!("P{}/{}", f.order.max(1), tv.field_size));
+            // Position trend since last frame (order falls as you move up). No glyphs (body font
+            // lacks ▲/▼) — colored "+n / -n" of places gained/lost.
+            if f.prev_order > 0 {
+                let gained = f.prev_order - f.order;
+                if gained != 0 {
+                    ui.same_line();
+                    val(ui, if gained > 0 { GOOD } else { BAD }, &format!("{gained:+}"));
+                }
+            }
             if f.spurt {
+                // Single spurt badge, coloured by the sustainability outlook.
                 ui.same_line();
-                val(ui, PINK, "SPURT");
+                let so = crate::freecam::spurt_outlook();
+                if so & 12 != 0 {
+                    val(ui, BAD, "SPURT \u{00b7} WON'T LAST");
+                } else if so & 3 != 0 {
+                    val(ui, GOOD, "SPURT OK");
+                } else {
+                    val(ui, PINK, "SPURT");
+                }
             }
             if f.exhausted {
                 ui.same_line();
                 val(ui, BAD, "EXHAUSTED");
+            }
+            // Live race-state badges (read straight from HorseRaceInfo each frame).
+            if f.late_start {
+                ui.same_line();
+                val(ui, WARN, "LATE START");
+            }
+            if f.blocked {
+                ui.same_line();
+                val(ui, BAD, "BLOCKED");
+            }
+            if f.fight {
+                ui.same_line();
+                val(ui, PINK, "FIGHT");
+            }
+            if f.leading {
+                ui.same_line();
+                val(ui, GOLD, "LEAD BATTLE");
+            }
+            // Why she can't win (DefeatType) — only once the game has decided a reason.
+            if let Some(lbl) = defeat_label(f.defeat) {
+                ui.same_line();
+                val(ui, WARN, lbl);
+            }
+            // Live AI states: kakari (burning stamina), down-slope accel (free speed), position-keep.
+            let fs = crate::freecam::follow_state();
+            if fs.kakari {
+                ui.same_line();
+                val(ui, WARN, "KAKARI");
+            }
+            if fs.downhill {
+                ui.same_line();
+                val(ui, GOOD, "DOWNHILL");
+            }
+            if let Some(k) = keep_label(fs.keep_mode) {
+                ui.same_line();
+                // PaseDown = conserving stamina (good); the rest are neutral tactical states.
+                val(ui, if fs.keep_mode == 4 { GOOD } else { ACCENT }, k);
             }
             let fr = sta(f.hp, f.max_hp);
             row(ui, "Stamina", fr, f.speed);
@@ -2542,9 +3137,39 @@ fn draw_freecam_telemetry(ui: &Ui, x: f32, y: f32, cond: Condition) {
             };
             ui.text_colored(DIM, &prog);
 
+            // ── pace trace (rolling speed sparkline) + final-3-furlong (上がり3F) marker ──
+            if crate::settings::tele_pace() {
+                ui.dummy([0.0, 2.0]);
+                let trace = crate::freecam::speed_trace();
+                ui.text_colored(DIM, "Pace");
+                ui.same_line_with_pos(c_bar);
+                let sp = ui.cursor_screen_pos();
+                let sh = 20.0 * scale;
+                spark(ui, &trace, crate::freecam::PACE_BUCKETS, bar_w, sh, PINK);
+                // Hover the pace graph → max / average / min speed for the race so far.
+                if trace.len() >= 2 && ui.is_mouse_hovering_rect(sp, [sp[0] + bar_w, sp[1] + sh]) {
+                    let mn = trace.iter().cloned().fold(f32::MAX, f32::min);
+                    let mx = trace.iter().cloned().fold(f32::MIN, f32::max);
+                    let avg = trace.iter().sum::<f32>() / trace.len() as f32;
+                    ui.tooltip(|| {
+                        ui.text_colored(GOLD, "Pace (this race)");
+                        ui.text_colored(GOOD, &format!("max  {mx:.1} m/s"));
+                        ui.text_colored([0.9, 0.9, 0.94, 1.0], &format!("avg  {avg:.1} m/s"));
+                        ui.text_colored(WARN, &format!("min  {mn:.1} m/s"));
+                    });
+                }
+                // Final-3-furlong (上がり3F) marker — AFTER the sparkline so it never clips it.
+                let remaining = if course > 0 { (course as f32 - f.distance).max(0.0) } else { -1.0 };
+                if remaining >= 0.0 && remaining <= 600.0 {
+                    ui.same_line();
+                    val(ui, PINK, &format!("LAST 3F {remaining:.0}m"));
+                }
+            }
+
             ui.dummy([0.0, 6.0]);
 
             // ── rival comparison (no ▲/▼ glyphs — the body font lacks them) ──
+            if show_rival {
             match tv.rival {
                 Some(r) => {
                     if tv.rival_ahead {
@@ -2570,23 +3195,55 @@ fn draw_freecam_telemetry(ui: &Ui, x: f32, y: f32, cond: Condition) {
                 }
                 None => ui.text_colored(DIM, "(no rival in range)"),
             }
+            }
 
-            // ── skill activation feed (selected Uma only; window grows as they fire) ──
+            // ── currently-active skill effects (live countdown bar + category colour) ──
+            if show_skills {
+                let active = crate::freecam::active_skills();
+                if !active.is_empty() {
+                    let names = crate::freecam::skill_feed();
+                    ui.dummy([0.0, 5.0]);
+                    ui.text_colored(GOLD, "ACTIVE NOW");
+                    for a in &active {
+                        let ccol = skill_cat_color(a.category, a.debuff);
+                        if let Some(tex) = skill_icon_tex(a.id) {
+                            imgui::Image::new(tex, [16.0 * scale, 16.0 * scale]).build(ui);
+                            ui.same_line();
+                        }
+                        let nm = names.iter().rev().find(|(id, _)| *id == a.id).map(|(_, n)| n.clone());
+                        let cp = ui.cursor_screen_pos();
+                        ui.set_cursor_screen_pos([cp[0], cp[1] + 1.0 * scale]);
+                        ui.text_colored(ccol, nm.as_deref().filter(|s| !s.is_empty()).unwrap_or("skill"));
+                        ui.same_line_with_pos(c_bar);
+                        pbar(ui, (a.left / 6.0).clamp(0.0, 1.0), bar_w, 11.0 * scale, ccol, &format!("{:.1}s", a.left));
+                    }
+                }
+            }
+
+            // ── skill activation feed (selected Uma only) — BOUNDED so it can't grow off-screen ──
             let feed = crate::freecam::skill_feed();
-            if !feed.is_empty() {
+            if show_skills && !feed.is_empty() {
                 ui.dummy([0.0, 5.0]);
                 ui.text_colored(GOLD, &format!("SKILLS ({})", feed.len()));
-                for (id, name) in feed.iter() {
+                // only the most recent few — the window never blocks the race view again
+                const TELE_FEED_MAX: usize = 8;
+                let start = feed.len().saturating_sub(TELE_FEED_MAX);
+                for (id, name) in feed.iter().skip(start) {
+                    let eff = crate::freecam::skill_effect_of(*id); // "+0.35 m/s 3s" (empty if unknown)
                     ui.group(|| {
                         if let Some(tex) = skill_icon_tex(*id) {
-                            imgui::Image::new(tex, [18.0, 18.0]).build(ui);
+                            imgui::Image::new(tex, [18.0 * scale, 18.0 * scale]).build(ui);
                             ui.same_line();
                             let cp = ui.cursor_screen_pos();
-                            ui.set_cursor_screen_pos([cp[0], cp[1] + 2.0]);
+                            ui.set_cursor_screen_pos([cp[0], cp[1] + 2.0 * scale]);
                             ui.text_colored(ACCENT, name);
                         } else {
                             // No icon → keep the dotted text line (default font has "·").
                             ui.text_colored(ACCENT, &format!("\u{00b7} {name}"));
+                        }
+                        if !eff.is_empty() {
+                            ui.same_line();
+                            ui.text_colored(DIM, &eff); // effect to the right of the skill name
                         }
                     });
                     // Hover → show what the skill does (from the extracted descriptions).
@@ -2599,11 +3256,59 @@ fn draw_freecam_telemetry(ui: &Ui, x: f32, y: f32, cond: Condition) {
                             });
                         }
                     }
+                    ui.dummy([0.0, 2.0 * scale]); // breathing room between skill rows (avoids overlap)
+                }
+            }
+
+            // ── live win probability (top 5) — softmax over the field, swings with the race ──
+            let mut wr = if crate::settings::tele_winprob() { crate::freecam::field_rows() } else { Vec::new() };
+            if wr.len() >= 2 {
+                wr.sort_by(|a, b| b.win.partial_cmp(&a.win).unwrap_or(std::cmp::Ordering::Equal));
+                ui.dummy([0.0, 6.0]);
+                panel_title(ui, "WIN %");
+                // Dedicated columns (absolute, like the timing tower) so the name never collides
+                // with the bar: [chip] name ............ [====bar====]%.
+                let c_winbar = 150.0 * scale;
+                let winbar_w = 92.0 * scale;
+                let wrowh = 16.0 * scale;
+                let wbh = 12.0 * scale;
+                let wth = ui.calc_text_size("0")[1];
+                for r in wr.iter().take(5) {
+                    let p = ui.cursor_screen_pos();
+                    // running-style colour chip (vertically centred)
+                    ui.get_window_draw_list()
+                        .add_rect(
+                            [p[0], p[1] + (wrowh - wbh) * 0.5],
+                            [p[0] + 6.0 * scale, p[1] + (wrowh + wbh) * 0.5],
+                            style_color(r.style),
+                        )
+                        .filled(true)
+                        .rounding(2.0)
+                        .build();
+                    // name (truncated to fit the name column → never overlaps the bar)
+                    let nm: String = if r.name.chars().count() > 16 {
+                        r.name.chars().take(15).collect::<String>() + "\u{2026}"
+                    } else {
+                        r.name.clone()
+                    };
+                    ui.set_cursor_screen_pos([p[0] + 12.0 * scale, p[1] + (wrowh - wth) * 0.5]);
+                    ui.text_colored(if r.followed { GOLD } else { [0.9, 0.9, 0.94, 1.0] }, &nm);
+                    // probability bar
+                    ui.set_cursor_screen_pos([p[0] + c_winbar, p[1] + (wrowh - wbh) * 0.5]);
+                    let col = if r.followed { GOLD } else { ACCENT };
+                    pbar(ui, r.win, winbar_w, wbh, col, &format!("{:.0}%", r.win * 100.0));
+                    ui.set_cursor_screen_pos([p[0], p[1] + wrowh]);
                 }
             }
 
             ui.dummy([0.0, 4.0]);
-            ui.text_colored(DIM, "[ ] switch Uma  \u{00b7}  arrows/I-K move  \u{00b7}  P save default");
+            // Freecam key controls only do anything when the freecam is engaged; in telemetry-only
+            // mode the tower click is how you switch the followed Uma.
+            if crate::freecam::is_enabled() {
+                ui.text_colored(DIM, "[ ] or 1-9 switch Uma  \u{00b7}  arrows/I-K move  \u{00b7}  P save");
+            } else {
+                ui.text_colored(DIM, "click a tower row to switch Uma  \u{00b7}  enable Freecam to move the camera");
+            }
             persist_window(ui, "telemetry");
         });
 }

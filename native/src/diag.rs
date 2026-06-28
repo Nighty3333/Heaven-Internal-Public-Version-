@@ -68,8 +68,9 @@ fn module_loaded(name: &str) -> bool {
     unsafe { !GetModuleHandleA(bytes.as_ptr()).is_null() }
 }
 
-// Identify the build so a report tells us which DLL the user is actually running. Uses `#[cfg]`
-// (not a runtime `if cfg!()`) so each build only ever contains its own label.
+// Identify the build so a report tells us which DLL the user is actually running. `#[cfg]` (not a
+// runtime `if cfg!()`) so the wording for OTHER builds is never COMPILED IN — the public build's
+// leak guard hard-fails if the literal "the full build" appears anywhere in the public DLL.
 #[cfg(all(not(feature = "oracle"), not(feature = "panels")))]
 fn build_kind() -> &'static str {
     "public"
@@ -90,7 +91,8 @@ pub fn report() -> String {
     s.push_str(&format!("Heaven version : {}\n", env!("CARGO_PKG_VERSION")));
     s.push_str(&format!("Build          : {}\n", build_kind()));
     // Compile-time feature fingerprint of the DLL. `#[cfg]` pushes (not an array of `cfg!()` bools)
-    // so each build only ever lists its own features.
+    // so feature-name literals for absent features are NOT compiled in — the public leak guard
+    // hard-fails on the literal "the full build"/"career"/"panels".
     let mut feats: Vec<&str> = Vec::new();
     #[cfg(feature = "raceread")]
     feats.push("raceread");

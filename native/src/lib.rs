@@ -48,13 +48,15 @@ mod race;
 #[cfg(feature = "raceread")]
 mod race_export;
 mod umas;
-// Player-horse identity from the network race response (msgpack); feeds the race-result skip.
+// Player-horse identity from the network response (msgpack). Public build only —
+// the private build gets the same data from `the full build`'s response hook.
 #[cfg(feature = "racenet")]
 mod race_net;
 mod settings;
 mod skip;
 #[cfg(feature = "banner")]
 mod startup_probe;
+// Live career reader (extra info panels). Private builds only.
 mod ui_tempo;
 mod update;
 
@@ -67,7 +69,7 @@ hudhook::hudhook!(ImguiDx11Hooks, HeavenOverlay::new_with_engine());
 impl HeavenOverlay {
     /// Construct the render loop and start the native engine. The engine thread
     /// waits for GameAssembly, resolves IL2CPP, installs every native module
-    /// (SuperSkip, FPS, race), and publishes into the shared
+    /// (career reader, SuperSkip, FPS, race), and publishes into the shared
     /// state the overlay renders. No Frida, no Python, no TCP.
     pub fn new_with_engine() -> Self {
         boot::spawn();

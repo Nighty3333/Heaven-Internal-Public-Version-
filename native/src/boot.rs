@@ -4,7 +4,7 @@
 //! DllMain), so we spawn a worker thread that:
 //!   1) waits for GameAssembly.dll,
 //!   2) resolves the IL2CPP C API + attaches the thread to the domain,
-//!   3) installs every native module (SuperSkip, FPS, race),
+//!   3) installs every native module (career reader, SuperSkip, FPS, race),
 //!   4) marks the engine ready.
 //! From then on the game's own threads drive our hooks and the overlay renders
 //! the shared state. No Frida, no Python — this is the full-native runtime.
@@ -180,8 +180,12 @@ pub fn spawn() {
             crate::diag::record_install("freecam", &r);
         }
 
-        // Player-horse identity parse: hooks the race response to find the player's horse,
-        // so the race-result skip's "only when you WON" gate knows your finish placement.
+        // Response hook (full build): parses the msgpack race response to
+        // identify the player's horse → needed by the Top-1 race-result skip gate.
+
+        // Public build: the player-horse identity parse that the full build would otherwise
+        // provide (so the race-result skip's "only when you WON" gate works). Only
+        // when the full build is absent — with the full build present its hook already does this.
         #[cfg(all(feature = "racenet", not(feature = "oracle")))]
         {
             crate::race_net::install();

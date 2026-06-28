@@ -57,11 +57,31 @@ To uninstall: delete the 3 files.
 - **Game speed** — speeds up the game's UI / story animations (menu opens, transitions,
   event text). Slider **1x–10x**.
 
-### Free camera (races)
-A free 3rd-person chase camera you can move around during a race. **Mouse** or **← →** to
-orbit, **↑ ↓** to zoom, **I / K** to raise and lower, **`[` `]`** to switch which Uma it
-follows. Save up to 4 named angle presets **per circuit** (**P** to save the current angle,
-**O** to cycle them). View-only — it never changes the race itself.
+### Race Director (races)
+A broadcast-style overlay for watching and casting races — a free camera plus a live, TV-grade
+telemetry suite. Read-only: it never changes the race.
+
+**Free camera** — a 3rd-person chase camera you move during a race (orbit, zoom, raise / lower,
+and switch which Uma it follows), with up to 4 named angle presets **per circuit**. **Every
+control is rebindable to any key** in *Race Director → Key bindings*, and the camera can be
+turned on or off mid-race.
+
+**Live telemetry HUD** — a broadcast layout that works **independently of the camera** (use
+either one on its own):
+
+- **Timing tower** — the whole field, leader-first: live order, time gaps, running-style
+  colours, and a green / red flash on the position number when an Uma gains or loses a place.
+  Click a row to follow that Uma.
+- **Win probability** — a live win chance for every runner that swings with the race.
+- **Race phase + final-furlong** markers, distance and progress.
+- **Followed-Uma panel** — stamina, speed, active skills *with their effect* (e.g. `+0.35 m/s`),
+  a whole-race **pace graph** (hover for max / average / minimum), and a side-by-side comparison
+  with the rival ahead.
+- **Trainer names** in lobby races (Team Trials, Champions Meeting, Room Match), with each
+  trainer's Umas grouped by colour.
+
+Toggle the whole HUD or any individual panel under *Race Director → Telemetry*. All windows are
+**resizable** — drag a corner to scale; sizes and positions are remembered.
 
 ### Performance
 - **Low Resources mode** — "potato" mode for very weak PCs: lowest 3D quality, no
@@ -148,7 +168,7 @@ normal startup.
 
 ## The menu (press **Insert**)
 
-A sidebar with sections: **Gameplay**, **Camera**, **Visuals**, **Performance**,
+A sidebar with sections: **Gameplay**, **Race Director**, **Visuals**, **Performance**,
 **Interface**, **About**. Every setting is remembered across sessions. The open/close key
 (default **Insert**) and the window layout are configurable in **Interface → Layout**.
 

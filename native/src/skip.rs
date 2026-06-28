@@ -577,6 +577,29 @@ static SHOP_PRESS_BACK_UNTIL: AtomicU64 = AtomicU64::new(0);
 fn now_ms() -> u64 {
     clock().elapsed().as_millis() as u64
 }
+
+// ── career heartbeat ─────────────────────────────────────────────────────────
+// The race-result auto-advance is a CAREER (single-mode) feature, but its press targets are
+// generic button names that also exist in other modes' menus — so if it armed in a non-career
+// race it kept auto-pressing menu buttons there (nothing clears the window outside career, since
+// only the single-mode ChangeMainView does). Fix: a positive gate. Every SingleMode (career-only)
+// hook stamps this heartbeat; the result skip only ARMS while the heartbeat is fresh — so it can
+// never arm or leak outside a career run.
+static LAST_CAREER_MS: AtomicU64 = AtomicU64::new(0);
+/// Mark that a career (single-mode) hook just fired. Called from the SingleMode-only detours.
+fn mark_career() {
+    // Log only the OPEN transition (gate was closed → now in career), so the log isn't spammed by
+    // the many ChangeMainView calls within a run.
+    if LAST_CAREER_MS.swap(now_ms(), Ordering::Relaxed) == 0 {
+        rr_log("[race-result] career detected (ChangeMainView) -> gate OPEN (skip may arm now)");
+    }
+}
+/// True if a career hook fired recently enough to still be in this career run (window spans a full
+/// race + the pre-race menu, so a legit career result is never blocked; goes stale after you leave).
+fn career_fresh() -> bool {
+    LAST_CAREER_MS.load(Ordering::Relaxed) != 0
+        && now_ms().saturating_sub(LAST_CAREER_MS.load(Ordering::Relaxed)) < 360_000
+}
 type BoolMethodFn = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
 unsafe extern "C" fn on_movenext(this: *mut c_void, m: *mut c_void) -> bool {
     let t = TR_MOVENEXT.load(Ordering::Relaxed);
@@ -834,6 +857,11 @@ fn rr_should_advance() -> bool {
     }
     // Never auto-advance during Team Trials (career-only feature).
     if IN_TEAM_TRIALS.load(Ordering::Relaxed) {
+        return false;
+    }
+    // Positive career gate: only ever auto-press inside a career (single-mode) run, so a stale armed
+    // window can't leak presses into other modes' menus.
+    if !career_fresh() {
         return false;
     }
     // Auto-advance when the player WON (placement 1), OR when no race retries remain
@@ -1158,6 +1186,7 @@ type Push2 = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_
 hook_slot!(TR_UPDATE, D_UPDATE);
 hook_slot!(TR_ONPC, D_ONPC);
 hook_slot!(TR_CMV, D_CMV);
+hook_slot!(TR_HOME, D_HOME); // HomeViewController.PlayInView — reached the lobby = left career
 hook_slot!(TR_PUSH1, D_PUSH1);
 hook_slot!(TR_PUSH2, D_PUSH2);
 
@@ -1176,6 +1205,8 @@ unsafe extern "C" fn on_button_update(this: *mut c_void, m: *mut c_void) {
             }
         }
     }
+    // Main-thread per-frame tick: let the the full build recompute its box geometry here
+    // (Unity UI calls are only safe on the game thread, not the render thread).
     if rr_should_advance() && WINDOW_OPEN.load(Ordering::Relaxed) && !in_heaven() {
         auto_press(this);
     }
@@ -1186,29 +1217,62 @@ unsafe extern "C" fn on_pointer_click(this: *mut c_void, evt: *mut c_void, m: *m
         let f: Void3 = std::mem::transmute(t);
         f(this, evt, m);
     }
-    if RACE_RESULT_ENABLED.load(Ordering::Relaxed)
-        && !in_heaven()
-        && !WINDOW_OPEN.load(Ordering::Relaxed)
-        && !IN_TEAM_TRIALS.load(Ordering::Relaxed)
-        && button_name(this).contains("RaceSkipButton")
-    {
+    if !RACE_RESULT_ENABLED.load(Ordering::Relaxed) || in_heaven() {
+        return;
+    }
+    // Only the in-race skip button is the anchor.
+    if !button_name(this).contains("RaceSkipButton") {
+        return;
+    }
+    // Log EVERY RaceSkipButton click + the gate decision, so the arm/disarm behaviour can be
+    // verified from heaven-native.log without having to reproduce the rare menu-bug live.
+    let tt = IN_TEAM_TRIALS.load(Ordering::Relaxed);
+    let cf = career_fresh();
+    let already = WINDOW_OPEN.load(Ordering::Relaxed);
+    let age = now_ms().saturating_sub(LAST_CAREER_MS.load(Ordering::Relaxed));
+    if !already && !tt && cf {
         WINDOW_OPEN.store(true, Ordering::Relaxed);
         clear_rr_caches();
         #[cfg(feature = "raceread")]
         let fo = crate::race::player_finish_order();
         rr_log(&format!(
-            "[race-result] window OPEN (anchor); finish_order={fo} -> {}",
+            "[race-result] RaceSkipButton -> ARMED (career age={age}ms, finish_order={fo} -> {})",
             if fo == 1 { "SKIP" } else { "MANUAL" }
+        ));
+    } else {
+        rr_log(&format!(
+            "[race-result] RaceSkipButton -> NOT armed (career_fresh={cf} age={age}ms, team_trials={tt}, already_open={already})"
         ));
     }
 }
 unsafe extern "C" fn on_change_main_view(this: *mut c_void, m: *mut c_void) {
     call_orig(&TR_CMV, this, m);
-    // ChangeMainView is single-mode only → we're back in career, clear the TT guard.
+    // ChangeMainView is single-mode only → we're in career; refresh the heartbeat + clear TT guard.
+    mark_career();
     IN_TEAM_TRIALS.store(false, Ordering::Relaxed);
     if WINDOW_OPEN.swap(false, Ordering::Relaxed) {
         clear_rr_caches();
+        rr_log("[race-result] back in career (ChangeMainView) -> window disarmed");
     }
+}
+// HomeViewController.PlayInView — the lobby (Home) is animating in, i.e. we've LEFT career. Hard-clear
+// the career heartbeat + disarm the race-result skip, so it can never leak into non-career modes
+// (you always pass through Home to reach Daily / Champions / Legend / Story). Returns the coroutine.
+unsafe extern "C" fn on_home_in(this: *mut c_void, m: *mut c_void) -> *mut c_void {
+    let t = TR_HOME.load(Ordering::Relaxed);
+    let rv = if t != 0 {
+        let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void = std::mem::transmute(t);
+        f(this, m)
+    } else {
+        std::ptr::null_mut()
+    };
+    LAST_CAREER_MS.store(0, Ordering::Relaxed); // career heartbeat → stale immediately
+    let was_open = WINDOW_OPEN.swap(false, Ordering::Relaxed);
+    if was_open {
+        clear_rr_caches();
+    }
+    rr_log(&format!("[race-result] Home reached -> gate CLOSED (heartbeat cleared, was_armed={was_open})"));
+    rv
 }
 unsafe extern "C" fn on_push1(this: *mut c_void, a: *mut c_void, m: *mut c_void) -> *mut c_void {
     let t = TR_PUSH1.load(Ordering::Relaxed);
@@ -1296,6 +1360,13 @@ pub fn install_race_result() -> Result<String, String> {
         install_one(btn, "Update", 0, on_button_update as *const (), &TR_UPDATE, &D_UPDATE)?;
         install_one(btn, "OnPointerClick", 1, on_pointer_click as *const (), &TR_ONPC, &D_ONPC)?;
         install_one(cvm, "ChangeMainView", 0, on_change_main_view as *const (), &TR_CMV, &D_CMV)?;
+        // Home (lobby) hard-clear — non-fatal: if it misses, the 6-min heartbeat window still bounds it.
+        let home = il2cpp::class("Gallop.HomeViewController");
+        if home.is_null() {
+            note.push_str("home view miss (heartbeat-only gate); ");
+        } else if install_one(home, "PlayInView", 0, on_home_in as *const (), &TR_HOME, &D_HOME).is_err() {
+            note.push_str("home hook miss; ");
+        }
         if dm.is_null() {
             note.push_str("dialog-mgr miss (no auto-close); ");
         } else {
