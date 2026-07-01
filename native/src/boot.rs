@@ -119,10 +119,16 @@ pub fn spawn() {
             crate::bgm::init();
         }
 
-        // Heaven+Hachimi variant: load any co-resident mod DLLs (heaven_plugins/) BEFORE we install
-        // our own hooks, so their detours land first and we yield/coexist deterministically.
-        #[cfg(feature = "hachimi")]
-        log(&format!("plugins: {}", crate::plugins::load()));
+        // External mod DLLs in heaven_plugins/ are LOADED much EARLIER by the version.dll
+        // proxy (in its DllMain, before the overlay and IL2CPP) so self-contained proxy-style
+        // mods install their hooks in time. See proxy/src/lib.rs::load_plugins_early.
+        //
+        // SDK-style plugins (built against an external mod-host SDK: they export `hachimi_init`
+        // and hook through a host-supplied vtable) can't act on a bare LoadLibrary — they need
+        // the host to call their init AFTER il2cpp is up. We do exactly that here, now that the
+        // runtime is ready, handing them a Heaven-backed compatible vtable. Self-contained mods
+        // (no such export) are left untouched (already started by the early loader).
+        log(&format!("plugins(sdk): {}", crate::hachimi_compat::init_plugins()));
 
         // 3) Install modules. Each is independent; one failing never blocks the
         //    others (keeps the proven core alive even if an experimental part
@@ -140,9 +146,10 @@ pub fn spawn() {
                 crate::diag::record_install("race-result", &format!("NOT armed ({e})"));
             }
         }
-        match fps::install() {
-            Ok(()) => { log("fps control: OK"); crate::diag::record_install("fps control", "OK"); }
-            Err(e) => { log(&format!("fps control: FAIL ({e})")); crate::diag::record_install("fps control", &format!("FAIL ({e})")); }
+        {
+            let fps_status = fps::install();
+            log(&format!("fps control: {fps_status}"));
+            crate::diag::record_install("fps control", &fps_status);
         }
         match crate::ui_tempo::install() {
             Ok(detail) => { log(&format!("ui tempo: {detail}")); crate::diag::record_install("ui tempo", detail); }

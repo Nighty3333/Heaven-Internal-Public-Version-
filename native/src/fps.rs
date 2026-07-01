@@ -21,15 +21,18 @@ use retour::RawDetour;
 use crate::il2cpp;
 
 type SetIntStatic = unsafe extern "C" fn(i32, *mut c_void);
+type SetIntIcall = unsafe extern "C" fn(i32); // native icall: NO trailing MethodInfo*
 
 static TARGET_TRAMP: AtomicUsize = AtomicUsize::new(0);
 static TARGET_MI: AtomicUsize = AtomicUsize::new(0);
 static VSYNC_TRAMP: AtomicUsize = AtomicUsize::new(0);
 static VSYNC_MI: AtomicUsize = AtomicUsize::new(0);
+static TARGET_ICALL_TRAMP: AtomicUsize = AtomicUsize::new(0);
 static CURRENT: AtomicI32 = AtomicI32::new(0); // requested cap (0 = off)
 
 static TARGET_DETOUR: OnceLock<RawDetour> = OnceLock::new();
 static VSYNC_DETOUR: OnceLock<RawDetour> = OnceLock::new();
+static TARGET_ICALL_DETOUR: OnceLock<RawDetour> = OnceLock::new();
 
 pub fn current() -> i32 {
     CURRENT.load(Ordering::Relaxed)
@@ -53,6 +56,21 @@ unsafe extern "C" fn target_hook(incoming: i32, mi: *mut c_void) {
     if t != 0 {
         let f: SetIntStatic = std::mem::transmute(t);
         f(value, mi);
+    }
+}
+
+/// Clamp-guard on the NATIVE set_targetFrameRate icall. `Gallop.FrameRateController` resolves this
+/// via `il2cpp_resolve_icall` and calls it DIRECTLY, bypassing the managed setter thunk above — that
+/// is why in-event overrides (`OverrideByNormalFrameRate` -> 30) started slipping past the clamp
+/// after the 2026-07-01 update and the fps dropped to 30. Hooking the icall covers that path too.
+/// Signature is `void(i32)` — the icall gets NO trailing MethodInfo*.
+unsafe extern "C" fn target_icall_hook(incoming: i32) {
+    let cap = CURRENT.load(Ordering::Relaxed);
+    let value = if cap == 0 { incoming } else { cap };
+    let t = TARGET_ICALL_TRAMP.load(Ordering::Relaxed);
+    if t != 0 {
+        let f: SetIntIcall = std::mem::transmute(t);
+        f(value);
     }
 }
 
@@ -108,21 +126,53 @@ unsafe fn hook(
     Ok(())
 }
 
-/// Resolve setters + install both clamp-guards. Call after il2cpp::init.
-pub fn install() -> Result<(), String> {
+/// Resolve setters + install the managed clamp-guards AND the native-icall guard. Returns a status
+/// string for the boot log (so a future break is visible). Call after il2cpp::init.
+pub fn install() -> String {
     let app = il2cpp::class("UnityEngine.Application");
     if app.is_null() {
-        return Err("app miss".into());
+        return "app class miss".into();
     }
+    let mut notes = String::new();
     unsafe {
-        hook(app, "set_targetFrameRate", target_hook as *const (), &TARGET_TRAMP, &TARGET_MI, &TARGET_DETOUR)?;
+        match hook(app, "set_targetFrameRate", target_hook as *const (), &TARGET_TRAMP, &TARGET_MI, &TARGET_DETOUR) {
+            Ok(()) => notes.push_str("managed=ok"),
+            Err(e) => notes.push_str(&format!("managed={e}")),
+        }
+    }
+    // Native icall guard: FrameRateController calls set_targetFrameRate directly via
+    // il2cpp_resolve_icall, skipping the managed thunk — without this, event/menu frame-rate
+    // overrides bypass the clamp and the fps drops to 30 (2026-07-01 regression). Resolve-by-name
+    // → survives future updates (RVAs move, the icall signature doesn't).
+    unsafe {
+        let icall = il2cpp::resolve_icall("UnityEngine.Application::set_targetFrameRate(System.Int32)");
+        if icall.is_null() {
+            notes.push_str(" icall=miss");
+        } else if il2cpp::is_detoured(icall) {
+            notes.push_str(" icall=already-detoured");
+        } else {
+            match RawDetour::new(icall as *const (), target_icall_hook as *const ()) {
+                Ok(d) if d.enable().is_ok() => {
+                    TARGET_ICALL_TRAMP.store(d.trampoline() as *const () as usize, Ordering::Relaxed);
+                    let _ = TARGET_ICALL_DETOUR.set(d);
+                    notes.push_str(" icall=ok");
+                }
+                Ok(_) => notes.push_str(" icall=enable-fail"),
+                Err(e) => notes.push_str(&format!(" icall={e}")),
+            }
+        }
     }
     // vSync is optional but important — without disabling it the target is ignored.
     let q = il2cpp::class("UnityEngine.QualitySettings");
     if !q.is_null() {
         unsafe {
-            let _ = hook(q, "set_vSyncCount", vsync_hook as *const (), &VSYNC_TRAMP, &VSYNC_MI, &VSYNC_DETOUR);
+            match hook(q, "set_vSyncCount", vsync_hook as *const (), &VSYNC_TRAMP, &VSYNC_MI, &VSYNC_DETOUR) {
+                Ok(()) => notes.push_str(" vsync=ok"),
+                Err(e) => notes.push_str(&format!(" vsync={e}")),
+            }
         }
+    } else {
+        notes.push_str(" vsync=no-class");
     }
-    Ok(())
+    notes
 }

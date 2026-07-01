@@ -637,10 +637,12 @@ unsafe extern "C" fn on_movenext(this: *mut c_void, m: *mut c_void) -> bool {
 // (Driving the coroutine to completion does NOT work here — its first step yields on the
 // rival model/asset load, never advancing the on-screen card; this early-skip does.)
 hook_slot!(TR_RIVALMN, D_RIVALMN);
-static DESTROY_RIVAL_ENTRY: OnceLock<Invokable> = OnceLock::new(); // SingleModeRaceEntryViewController.DestroyRivalEntry
+static DESTROY_RIVAL_ENTRY: OnceLock<Invokable> = OnceLock::new(); // PartsRivalEntryAnimation.DestroyRivalEntryWithUnload
 const O_RIVAL_STATE: usize = 0x10; // <>1__state
 const O_RIVAL_ENDACTION: usize = 0x20; // endAction (System.Action)
-const O_RIVAL_THIS: usize = 0x28; // <>4__this (SingleModeRaceEntryViewController)
+// 2026-07-01 update: coroutine moved to Gallop.PartsRivalEntryAnimation.d__11; a new
+// itemIconList field @0x28 pushed <>4__this from 0x28 -> 0x30.
+const O_RIVAL_THIS: usize = 0x30; // <>4__this (PartsRivalEntryAnimation)
 unsafe extern "C" fn on_rival_movenext(this: *mut c_void, m: *mut c_void) -> bool {
     let t = TR_RIVALMN.load(Ordering::Relaxed);
     if t == 0 {
@@ -1505,7 +1507,8 @@ pub fn install() -> (bool, bool, String) {
     {
         let coro = il2cpp::nested_class(
             "Gallop.PartsSingleModeScenarioFreeUseItemPerformance",
-            "<PlayUseItemPerformanceCoroutine>d__14",
+            // 2026-07-01 update: same class, coroutine index renumbered d__14 -> d__13.
+            "<PlayUseItemPerformanceCoroutine>d__13",
         );
         if coro.is_null() {
             notes.push_str("useperf coro miss; ");
@@ -1537,18 +1540,21 @@ pub fn install() -> (bool, bool, String) {
 
     // ── RIVAL-RACE entry intro ("RIVAL <name>" card) — skip its coroutine on the first step ──
     {
-        let entry = il2cpp::class("Gallop.SingleModeRaceEntryViewController");
+        // 2026-07-01 update: the rival entry moved out of SingleModeRaceEntryViewController into
+        // Gallop.PartsRivalEntryAnimation, and DestroyRivalEntry was split — DestroyRivalEntryWithUnload
+        // is the full teardown (unloads the zekken assets + calls DestroyRivalEntryAnimationObj).
+        let entry = il2cpp::class("Gallop.PartsRivalEntryAnimation");
         if entry.is_null() {
             notes.push_str("rival entry cls miss; ");
         } else {
-            let _ = DESTROY_RIVAL_ENTRY.set(resolve(entry, "DestroyRivalEntry", 0));
+            let _ = DESTROY_RIVAL_ENTRY.set(resolve(entry, "DestroyRivalEntryWithUnload", 0));
             if !DESTROY_RIVAL_ENTRY.get().map(|i| i.ok()).unwrap_or(false) {
                 notes.push_str("rival destroy miss; ");
             }
         }
         let rcoro = il2cpp::nested_class(
-            "Gallop.SingleModeRaceEntryViewController",
-            "<PlayRivalEntryCoroutine>d__103",
+            "Gallop.PartsRivalEntryAnimation",
+            "<PlayRivalEntryCoroutine>d__11",
         );
         if rcoro.is_null() {
             notes.push_str("rival coro miss; ");

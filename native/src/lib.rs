@@ -24,8 +24,8 @@ mod crashlog;
 mod cyspring;
 mod data;
 mod diag;
-#[cfg(feature = "hachimi")]
 mod plugins;
+mod hachimi_compat;
 mod display;
 #[cfg(feature = "freecam")]
 mod freecam;
